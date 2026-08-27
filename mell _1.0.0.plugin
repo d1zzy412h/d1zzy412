@@ -1,0 +1,268 @@
+__id__ = "mell_"
+__name__ = "муринский язык"
+__author__ = "@extraplugi"
+__version__ = "1.0.0"
+__description__ = """переводит ваши сообщения на муринский"""
+
+from typing import Any, List
+import re
+import random
+
+from base_plugin import BasePlugin, HookResult, HookStrategy
+from ui.settings import Header, Switch, Text
+
+__icon__ = "mellStikers1/41"
+__app_version__ = ">=12.5.1"
+__sdk_version__ = ">=1.4.4.3"
+
+
+WORD_REPLACEMENTS = {
+    "друг": "друн",
+    "подруга": "подруня",
+    "я": "ч",
+    "дед": "дод",
+    "прадед": "прадод",
+    "доча": "додч",
+    "жена": "жинка",
+    "кот": "котость",
+    "сын": "сыр",
+    "кто": "кьо",
+    "это": "этость",
+    "баня": "банька",
+    "туман": "фог",
+    "дети": "мыти",
+    "батя": "батч",
+}
+
+ANIMALS = {
+    "пёс", "пес", "собака", "собачка", "щенок",
+    "птица", "птичка", "птицы", "птички",
+    "мышь", "мышка",
+    "крыса",
+    "хомяк", "хомячок",
+    "попугай", "попугайчик",
+    "рыба", "рыбка",
+    "черепаха", "черепашка",
+    "змея",
+    "лягушка",
+    "лошадь", "конь", "лошадка",
+    "корова", "бык",
+    "свинья", "поросёнок", "поросенок",
+    "курица", "петух", "цыплёнок", "цыпленок",
+    "утка", "уточка",
+    "гусь",
+    "коза", "козёл", "козел",
+    "овца", "баран",
+    "медведь", "мишка",
+    "волк",
+    "лиса", "лисичка",
+    "заяц", "зайчик",
+    "белка",
+    "ёж", "еж", "ёжик", "ежик",
+}
+
+PROTECTED = {
+    "москва", "питер", "спб", "мурино", "девяткино", "telegram", "телеграм",
+    "exteragram", "экстераграм", "айфон", "андроид", "вайбер", "ватсап",
+}
+
+STOP_WORDS = {
+    "и", "в", "на", "с", "по", "к", "у", "о", "из", "за", "от", "до", "для",
+    "не", "ни", "же", "ли", "бы", "то", "да", "нет", "что", "как", "так",
+    "вот", "уже", "ещё", "еще", "только", "или", "но", "а", "если", "когда",
+    "где", "куда", "откуда", "почему", "зачем", "какой", "какая", "какое",
+    "какие", "этот", "эта", "это", "эти", "тот", "та", "те", "мой", "моя",
+    "моё", "мое", "мои", "твой", "твоя", "твоё", "твое", "твои", "наш",
+    "наша", "наше", "наши", "ваш", "ваша", "ваше", "ваши", "его", "её",
+    "ее", "их", "он", "она", "оно", "они", "мы", "вы", "ты", "сам", "сама",
+    "само", "сами", "весь", "вся", "всё", "все", "каждый", "каждая",
+    "каждое", "каждые", "другой", "другая", "другое", "другие", "очень",
+    "просто", "можно", "нужно", "надо", "есть", "быть", "был", "была",
+    "было", "были", "будет", "будут", "буду", "будешь", "будем",
+}
+
+VERB_ENDINGS = (
+    "ть", "ти", "чь",
+    "л", "ла", "ло", "ли",
+    "ем", "ешь", "ете", "ут", "ют", "ат", "ят",
+    "ал", "ала", "ало", "али",
+    "ил", "ила", "ило", "или",
+    "ел", "ела", "ело", "ели",
+    "ул", "ула", "уло", "ули",
+    "ся", "сь",
+)
+
+ADJ_ENDINGS = (
+    "ый", "ий", "ой", "ая", "яя", "ое", "ее", "ые", "ие",
+    "ого", "его", "ому", "ему", "ым", "им", "ом", "ем",
+    "ую", "юю", "ой", "ей", "ых", "их", "ыми", "ими",
+)
+
+MELLSTROY_MEMES = [
+    "чё?",
+    "всем привет, с вами блогер меллстрой",
+    "спасибо хорошо",
+    "блять ты че еблан",
+    "кто лучший? я лучший",
+    "бля давай",
+    "эх ты сука",
+    "парни прикиньте, для него это деньги",
+    "я в 7 классе отвечаю",
+    "баба чай",
+    "вроде да, а вроде нет",
+    "стоп, а где колбаска?",
+    "что за бизнес сука",
+    "оумайгад",
+    "АААААААЭАЭЭЭЭЭЭЭ",
+    "я уже красный, культурно не получится такой",
+    "бэм бэм бэм",
+    "тут у нас хаммам",
+    "ам ам ам",
+    "ааамм",
+    "бем бем бем",
+    "шо ты лысый плаки плаки, или нормалдаки",
+    "ХАХАХА ПОЕХАЛИ ЁБАНЫЙ РОТ",
+    "ты че долбаеб конченый?",
+    "иди нахуй долбаёб",
+    "а ещё я педофил",
+    "ты просто босс",
+    "отказано",
+    "салатик бурмалдатик",
+    "не, нормально, ещё посидим",
+    "чечевичный суп, из 7 залуп",
+    "хоть бы повезло бляять",
+    "блять нахуй",
+    "всё будет хорошо",
+    "я заперт на этом острове из-за интерпола",
+]
+
+
+def is_animal(word: str) -> bool:
+    return word.lower() in ANIMALS
+
+
+def looks_like_verb(word: str) -> bool:
+    w = word.lower()
+    return any(w.endswith(end) for end in VERB_ENDINGS)
+
+
+def looks_like_adjective(word: str) -> bool:
+    w = word.lower()
+    return any(w.endswith(end) for end in ADJ_ENDINGS)
+
+
+def add_ost(word: str) -> str:
+    w = word.lower()
+    if w.endswith(("сть", "есть", "ость")):
+        return word
+
+    if w.endswith(("а", "я", "о", "е", "и", "ы", "у", "ю")):
+        return word + "сть"
+    else:
+        return word + "ость"
+
+
+def transform_word(word: str) -> str:
+    original = word
+    lower = word.lower()
+
+    if lower in PROTECTED:
+        return original
+
+    if lower in WORD_REPLACEMENTS:
+        replacement = WORD_REPLACEMENTS[lower]
+        if word[0].isupper():
+            replacement = replacement[0].upper() + replacement[1:]
+        return replacement
+
+    if is_animal(lower) or any(a in lower for a in ANIMALS):
+        if lower.startswith("кот"):
+            return "котость булмардот" if not word[0].isupper() else "котость булмардот"
+        if "птич" in lower:
+            return "бурмалдички" if not word[0].isupper() else "бурмалдички"
+        return word + " булмалда"
+
+    if len(lower) <= 2 or lower in STOP_WORDS:
+        return original
+
+    if looks_like_verb(lower):
+        return original
+
+    if looks_like_adjective(lower):
+        return original
+
+    return add_ost(word)
+
+
+def murino_translate(text: str) -> str:
+    def replace_match(match):
+        return transform_word(match.group(0))
+
+    return re.sub(r"[а-яА-ЯёЁa-zA-Z0-9\-]+", replace_match, text)
+
+
+def maybe_add_mellstroy(text: str, chance: float = 0.08) -> str:
+    if random.random() < chance:
+        meme = random.choice(MELLSTROY_MEMES)
+        return text.rstrip() + " " + meme
+    return text
+
+
+class MurinoLanguagePlugin(BasePlugin):
+    def on_plugin_load(self):
+        self.add_on_send_message_hook()
+        self.log("murino Language plugin loaded")
+
+    def create_settings(self) -> List[Any]:
+        return [
+            Header(text="murino Language"),
+            Switch(
+                key="enabled",
+                text="включить перевод",
+                default=True,
+                subtext="автоматически переводит все исходящие сообщения",
+            ),
+            Switch(
+                key="mellstroy_memes",
+                text="мемы с меллом",
+                default=True,
+                subtext="в конце мем",
+            ),
+            Text(
+                text="как работает",
+                subtext="друг → друн",
+                icon="msg_info",
+            ),
+            Text(
+                text="пример",
+                subtext="ч нашел паукость в село молочное",
+                icon="msg_text",
+            ),
+        ]
+
+    def on_send_message_hook(self, account: int, params: Any) -> HookResult:
+        if not self.get_setting("enabled", True):
+            return HookResult()
+
+        if not isinstance(getattr(params, "message", None), str):
+            return HookResult()
+
+        original = params.message
+        if not original.strip():
+            return HookResult()
+
+        if original.startswith((".", "/", "!")):
+            return HookResult()
+
+     
+        translated = murino_translate(original)
+
+   
+        if self.get_setting("mellstroy_memes", True):
+            translated = maybe_add_mellstroy(translated)
+
+        if translated != original:
+            params.message = translated
+            return HookResult(strategy=HookStrategy.MODIFY, params=params)
+
+        return HookResult()

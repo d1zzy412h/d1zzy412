@@ -1,0 +1,1720 @@
+__id__ = "horrorgram"
+__name__ = "horrorgram"
+__author__ = "диззи"
+__version__ = "1.1.0"
+__description__ = """аа страшно"""
+
+"""
+МОРГ — хоррор-плагин для exteraGram.
+Скримеры, подмена ников, камера, пуши, фантомный звонок, ночной режим и др.
+Master switch выкл. по умолчанию. Без стробоскопа.
+"""
+
+import random
+import threading
+import time
+import urllib.request
+from typing import Any, List
+
+from base_plugin import BasePlugin
+from ui.settings import Header, Switch, Text, Divider, Selector
+from ui.alert import AlertDialogBuilder
+from ui.bulletin import BulletinHelper
+from client_utils import get_last_fragment
+from android_utils import run_on_ui_thread, log
+
+from android.view import View, ViewGroup
+from android.graphics import (
+    Paint, ColorMatrix, ColorMatrixColorFilter, Color, BitmapFactory,
+    Bitmap, Canvas, BitmapShader, Shader, Typeface,
+)
+from android.graphics.drawable import GradientDrawable
+from android.widget import TextView, ImageView, LinearLayout, EditText, FrameLayout
+from android.media import ToneGenerator, AudioManager
+from android.os import VibrationEffect, Build
+from android.content import Context, Intent
+from android.provider import MediaStore
+
+__icon__ = "horrorparty/87"
+__min_version__ = "12.5.1"
+__app_version__ = ">=12.5.1"
+
+
+WHISPERS = [
+    "ты не один", "оно уже здесь", "не смотри вверх", "закрывай глаза",
+    "я под кроватью", "дверь открыта", "кто-то дышит", "сообщение не от него",
+    "аватарка моргнула", "3:33", "выключи свет", "за тобой пустота",
+    "имя стёрто", "чат смотрит на тебя", "не отвечай",
+    "он мёртв с прошлого вторника", "ты следующий в списке", "камера включена",
+    "я читаю вместе с тобой", "отражение врёт", "не оборачивайся",
+    "шаги в коридоре", "телефон сам разблокировался", "это не твои руки",
+    "забудь пароль", "МОРГ", "он знает, где ты",
+    "последнее сообщение было не от человека",
+    "камера смотрит в комнату", "не гаси экран", "я в твоём кармане",
+    "слышу дыхание", "запись идёт", "лицо в стекле", "не звони маме",
+    "номер уже занят мной", "твой голос сохранён", "мы рядом с домом",
+    "открой дверь", "не читай дальше", "батарея врёт", "GPS включён",
+    "микрофон не выключен", "я видел твой сон", "лифт едет на твой этаж",
+]
+
+SCARE_TITLES = ["МОРГ", "…", "НАШЁЛ", "СМОТРИ", "ТИШЕ", "!!!", "ОНО", "БЛИЖЕ"]
+
+FAKE_NAMES = [
+    "удалённый_аккаунт", "нет_лица", "ошибка_404", "не_человек",
+    "тень_в_чате", "пустота", "кто_то_другой", "не_он",
+    "труп_онлайн", "молчит_с_3:07", "стёртый", "не_твой_друг",
+    "наблюдатель", "латентный", "запись_с_камеры", "голос_из_трубки",
+    "тот_кто_за_стеклом", "домой_не_ходи", "смотри_в_объектив",
+]
+
+FAKE_BUBBLES = [
+    "я не тот, кем ты меня считаешь", "этот контакт давно мёртв",
+    "ты пишешь в пустоту", "аватарка — чужая", "сообщения пишет кто-то ещё",
+    "не открывай следующий чат", "я вижу твой экран", "выйди. сейчас.",
+    "не пиши это", "он читает", "я подменил текст",
+]
+
+SCARE_URLS = [
+    "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcTzC1PsHADfY3oQx3BJGSWqb1Tq567_GtFdmA&s",
+    "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcQZBfrb9SBrwTgc8Iv8Z_ti1z4j0CTDMmrD9A&s",
+    "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcQs34dh999WkQKvyUYkke7SLpKanXISIJdy_iQ6mtkeHQ&s=10",
+    "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcS2FlvO4nUuhqWGXfo5oho5Idu6qXWWOoMNL4g3e0T_1w&s=10",
+    "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcSY0P3CW-gPgiOsNyelFpynW1Id8ZR0BTEU5aOKMPGcww&s=10",
+    "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcSUJU5o5UDrWR5_T-kkBIIzqHMX-tMVTiklon13Co4MedAHPzxXzhHf1jzz&s=10",
+    "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcRNNZ3ffXEGJ89w79VghxIoi44QCobTzevP4w5EUleuxWNwY8m8QmCtMs86&s=10",
+    "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcTaOyc6nM_EA5UDdtEBcF9mnW3U5RXTmE5bkJREUr9d6w&s=10",
+    "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcRmClcIQZ-Q5mrGs26Kq7x4u8bQhgXEzcw7zMpzdyow1g&s=10",
+]
+
+FREQ = [
+    ("Тест 5–12 сек", 5, 12),
+    ("Часто 30–90 сек", 30, 90),
+    ("Живо 2–5 мин", 120, 300),
+    ("Средне 8–20 мин", 480, 1200),
+    ("Редко 30–90 мин", 1800, 5400),
+    ("Почти никогда 2–5 ч", 7200, 18000),
+]
+
+COMBO_EVERY = [
+    ("Тест 15 сек", 15),
+    ("Каждую минуту", 60),
+    ("Каждые 3 мин", 180),
+    ("Каждые 10 мин", 600),
+    ("Полчаса", 1800),
+    ("Час", 3600),
+    ("Три часа", 10800),
+]
+
+VOL = [
+    ("Шёпот", 8, 22),
+    ("Тихо", 18, 40),
+    ("Громко", 45, 75),
+    ("Крик", 75, 100),
+]
+
+TONE_NAMES = [
+    "TONE_SUP_ERROR", "TONE_SUP_BUSY", "TONE_SUP_CONGESTION", "TONE_SUP_RADIO_NOTAVAIL",
+    "TONE_SUP_INTERCEPT", "TONE_SUP_CALL_WAITING", "TONE_PROP_NACK", "TONE_PROP_BEEP2",
+    "TONE_PROP_BEEP", "TONE_PROP_PROMPT", "TONE_CDMA_ABBR_ALERT", "TONE_CDMA_EMERGENCY_RINGBACK",
+    "TONE_CDMA_NETWORK_BUSY", "TONE_CDMA_REORDER", "TONE_CDMA_ABBR_REORDER",
+    "TONE_CDMA_CALLDROP_LITE", "TONE_CDMA_HIGH_L", "TONE_CDMA_MED_L", "TONE_CDMA_LOW_L",
+    "TONE_CDMA_HIGH_SS", "TONE_CDMA_MED_SS", "TONE_CDMA_SOFT_ERROR_LITE",
+    "TONE_CDMA_ALERT_CALL_GUARD", "TONE_CDMA_ALERT_NETWORK_LITE", "TONE_PROP_ACK",
+    "TONE_SUP_PIP", "TONE_CDMA_PIP", "TONE_CDMA_NETWORK_CALLWAITING",
+]
+
+CODE_WORDS = ("забудь", "мorg", "morg", "морге", "forget", "мoрг")
+
+
+def _slog(msg):
+    try:
+        log("[МОРГ] %s" % msg)
+    except Exception:
+        pass
+
+
+class MorguePlugin(BasePlugin):
+
+    def on_plugin_load(self):
+        self._alive = False
+        self._bitmaps = []
+        self._tones = None
+        self._visits = int(self.get_setting("_visits", 0) or 0) + 1
+        try:
+            self.set_setting("_visits", self._visits)
+        except Exception:
+            pass
+        self._disable_confirm = 0
+        _slog("визит #%s" % self._visits)
+        if self.get_setting("enabled", False):
+            self._arm()
+            if self.get_setting("fx_visit_count", True) and self._visits % 3 == 0:
+                run_on_ui_thread(lambda: BulletinHelper.show_error(
+                    "ты открывал МОРГ %s раз. хватит." % self._visits
+                ))
+
+    def on_plugin_unload(self):
+        self._disarm()
+
+    # ── settings ──
+
+    def create_settings(self):
+        return [
+            Header(text="МОРГ v4"),
+            Switch(
+                key="enabled",
+                text="Впустить МОРГ",
+                default=False,
+                subtext="Главный рубильник. При выключении спросит 3 раза.",
+                on_change=self._on_toggle,
+            ),
+            Text(
+                text="Ударить скримером сейчас",
+                subtext="Полный комбо",
+                icon="msg_gif",
+                on_click=lambda v: self._manual_scare(),
+            ),
+            Divider(),
+            Header(text="Скримеры и звук"),
+            Switch(key="fx_image", text="Картинка на весь экран", default=True),
+            Switch(key="fx_sound", text="Резкие звуки", default=True),
+            Switch(key="fx_boost_vol", text="Форсировать громкость", default=True),
+            Switch(key="fx_vibrate", text="Рваная вибрация", default=True),
+            Switch(key="fx_double_hit", text="Тройной звуковой удар", default=True),
+            Switch(key="fx_silence_scare", text="Тишина → удар", default=True,
+                   subtext="5–8 сек mute, потом скример."),
+            Switch(key="fx_heartbeat", text="Тихий heartbeat", default=True,
+                   subtext="Редкая вибрация тук… тук."),
+            Selector(key="vol_idx", text="Громкость", default=3, items=[x[0] for x in VOL]),
+            Divider(),
+            Header(text="Имена и текст"),
+            Switch(key="fx_swap_names", text="Смешивать ник с жутким", default=True,
+                   subtext="«Вася / труп_онлайн» на 5–12 сек."),
+            Switch(key="fx_dead_status", text="«Мёртвые» статусы", default=True),
+            Switch(key="fx_fake_msg", text="Фейковое входящее", default=True),
+            Switch(key="fx_input_glitch", text="Глитч поля ввода", default=True,
+                   subtext="На миг подставляет «не пиши это» / «он читает»."),
+            Switch(key="fx_bubble_glitch", text="Глитч текста на экране", default=True),
+            Switch(key="fx_fake_react", text="Фейк-реакции 💀👁️", default=True),
+            Switch(key="fx_typing", text="Чужой «печатает…»", default=True),
+            Switch(key="fx_unread_lie", text="Ложный счётчик непрочитанных", default=True),
+            Divider(),
+            Header(text="Камера и слежка"),
+            Switch(key="fx_open_camera", text="Открывать камеру", default=True),
+            Switch(key="fx_front_hint", text="«СМОТРИ В ОБЪЕКТИВ»", default=True),
+            Switch(key="fx_shutter", text="Вспышка + звук затвора", default=True),
+            Switch(key="fx_cam_preview", text="Фейк-превью CAM·REC", default=True),
+            Switch(key="fx_sys_notify", text="Страшные уведомления", default=True),
+            Switch(key="fx_echo_notify", text="Эхо уведомления", default=True),
+            Divider(),
+            Header(text="Сломы экрана"),
+            Switch(key="fx_invert", text="Инверсия", default=True),
+            Switch(key="fx_gray", text="Ч/б", default=True),
+            Switch(key="fx_black", text="Чёрный кадр", default=True),
+            Switch(key="fx_shift", text="Глитч-сдвиг", default=True),
+            Switch(key="fx_blur", text="Блюр (Android 12+)", default=True),
+            Switch(key="fx_drift", text="Медленный дрейф UI", default=True),
+            Switch(key="fx_vignette", text="Тёмные края (vignette)", default=True),
+            Switch(key="fx_time_lie", text="Ложное время 3:33", default=True),
+            Switch(key="fx_blood_text", text="Кровяной текст", default=True),
+            Switch(key="fx_whisper", text="Диалог-шёпот", default=True),
+            Switch(key="fx_ghost", text="Призрачный тап", default=True),
+            Switch(key="fx_kick_chat", text="Выкинуть из чата", default=True),
+            Switch(key="fx_lock_hint", text="Фейк-блокировка", default=True),
+            Switch(key="fx_phantom_call", text="Фантомный входящий", default=True),
+            Divider(),
+            Header(text="Мета"),
+            Switch(key="fx_night_mode", text="Ночной режим (после 00:00 ×2)", default=True),
+            Switch(key="fx_visit_count", text="Счётчик визитов", default=True),
+            Switch(key="fx_code_word", text="Код-слово → скример", default=True,
+                   subtext="забудь / morg / forget в любом EditText."),
+            Switch(key="fx_kill_app", text="Иногда вылет из приложения", default=False),
+            Selector(
+                key="kill_chance_idx",
+                text="Шанс вылета при комбо",
+                default=1,
+                items=["3%", "8%", "15%", "25%"],
+            ),
+            Divider(),
+            Header(text="Темп"),
+            Selector(key="freq_idx", text="Случайные события", default=1,
+                     items=[x[0] for x in FREQ]),
+            Switch(key="combo_on", text="Комбо по таймеру", default=True),
+            Selector(key="combo_idx", text="Интервал комбо", default=1,
+                     items=[x[0] for x in COMBO_EVERY]),
+            Divider(),
+            Text(text="Только на переднем плане. Код-слова: забудь, morg, forget."),
+        ]
+
+    def _on_toggle(self, val):
+        if val:
+            self._disable_confirm = 0
+            self._arm()
+            return
+        # выключение: 3 подтверждения
+        self._disable_confirm += 1
+        if self._disable_confirm < 3:
+            try:
+                self.set_setting("enabled", True)
+            except Exception:
+                pass
+            left = 3 - self._disable_confirm
+            BulletinHelper.show_error("ты уверен? ещё %s раз выключи" % left)
+            return
+        self._disable_confirm = 0
+        self._disarm()
+        BulletinHelper.show_info("МОРГ ушёл. пока.")
+
+    def _arm(self):
+        if self._alive:
+            return
+        self._alive = True
+        threading.Thread(target=self._loop_random, daemon=True).start()
+        threading.Thread(target=self._loop_combo, daemon=True).start()
+        threading.Thread(target=self._loop_heartbeat, daemon=True).start()
+        threading.Thread(target=self._loop_codewatch, daemon=True).start()
+        if self.get_setting("fx_image", True):
+            threading.Thread(target=self._fetch_images, daemon=True).start()
+
+    def _disarm(self):
+        self._alive = False
+
+    def _fg(self):
+        try:
+            frag = get_last_fragment()
+            act = frag.getParentActivity() if frag else None
+            return bool(act and act.hasWindowFocus())
+        except Exception:
+            return False
+
+    def _is_night(self):
+        if not self.get_setting("fx_night_mode", True):
+            return False
+        try:
+            h = time.localtime().tm_hour
+            return h >= 0 and h < 6
+        except Exception:
+            return False
+
+    def _freq(self):
+        try:
+            i = int(self.get_setting("freq_idx", 1))
+        except Exception:
+            i = 1
+        i = max(0, min(i, len(FREQ) - 1))
+        lo, hi = float(FREQ[i][1]), float(FREQ[i][2])
+        if self._is_night():
+            lo, hi = max(3.0, lo / 2.0), max(6.0, hi / 2.0)
+        return lo, hi
+
+    def _combo_sec(self):
+        try:
+            i = int(self.get_setting("combo_idx", 1))
+        except Exception:
+            i = 1
+        i = max(0, min(i, len(COMBO_EVERY) - 1))
+        sec = max(float(COMBO_EVERY[i][1]), 8.0)
+        if self._is_night():
+            sec = max(8.0, sec / 2.0)
+        return sec
+
+    def _vol(self):
+        try:
+            i = int(self.get_setting("vol_idx", 3))
+        except Exception:
+            i = 3
+        i = max(0, min(i, len(VOL) - 1))
+        return VOL[i][1], VOL[i][2]
+
+    def _kill_chance(self):
+        try:
+            i = int(self.get_setting("kill_chance_idx", 1))
+        except Exception:
+            i = 1
+        return [0.03, 0.08, 0.15, 0.25][max(0, min(i, 3))]
+
+    def _loop_random(self):
+        while self._alive and self.get_setting("enabled", False):
+            lo, hi = self._freq()
+            time.sleep(random.uniform(lo, hi))
+            if not self._alive or not self.get_setting("enabled", False):
+                break
+            if not self._fg():
+                continue
+            try:
+                run_on_ui_thread(self._roll_event)
+            except Exception as e:
+                _slog("random: %s" % e)
+
+    def _loop_combo(self):
+        while self._alive and self.get_setting("enabled", False):
+            time.sleep(self._combo_sec())
+            if not self._alive or not self.get_setting("enabled", False):
+                break
+            if not self.get_setting("combo_on", True) or not self._fg():
+                continue
+            try:
+                run_on_ui_thread(self._full_scare)
+            except Exception as e:
+                _slog("combo: %s" % e)
+
+    def _loop_heartbeat(self):
+        while self._alive and self.get_setting("enabled", False):
+            time.sleep(random.uniform(45, 120))
+            if not self._alive or not self.get_setting("fx_heartbeat", True) or not self._fg():
+                continue
+            try:
+                run_on_ui_thread(self._fx_heartbeat)
+            except Exception:
+                pass
+
+    def _loop_codewatch(self):
+        """Ищет код-слово в EditText на экране."""
+        while self._alive and self.get_setting("enabled", False):
+            time.sleep(2.5)
+            if not self.get_setting("fx_code_word", True) or not self._fg():
+                continue
+            try:
+                run_on_ui_thread(self._scan_code_words)
+            except Exception:
+                pass
+
+    def _manual_scare(self):
+        if not self.get_setting("enabled", False):
+            BulletinHelper.show_error("Сначала «Впустить МОРГ»")
+            return
+        if not self._bitmaps:
+            threading.Thread(target=self._fetch_images, daemon=True).start()
+            BulletinHelper.show_info("Гружу лица…")
+            return
+        run_on_ui_thread(self._full_scare)
+
+    def _roll_event(self):
+        if not self._fg():
+            return
+        bag = []
+
+        def add(fn, w):
+            if fn:
+                bag.append((fn, w))
+
+        if self.get_setting("fx_whisper", True):
+            add(self._fx_whisper, 6)
+        if self.get_setting("fx_sys_notify", True):
+            add(self._fx_sys_notify, 7)
+        if self.get_setting("fx_echo_notify", True):
+            add(self._fx_echo_notify, 4)
+        if self.get_setting("fx_blood_text", True):
+            add(self._fx_blood, 6)
+        if self.get_setting("fx_fake_msg", True):
+            add(self._fx_fake_msg, 5)
+        if self.get_setting("fx_swap_names", True):
+            add(self._fx_swap_names, 6)
+        if self.get_setting("fx_dead_status", True):
+            add(self._fx_dead_status, 5)
+        if self.get_setting("fx_input_glitch", True):
+            add(self._fx_input_glitch, 5)
+        if self.get_setting("fx_bubble_glitch", True):
+            add(self._fx_bubble_glitch, 5)
+        if self.get_setting("fx_fake_react", True):
+            add(self._fx_fake_react, 4)
+        if self.get_setting("fx_typing", True):
+            add(self._fx_typing, 4)
+        if self.get_setting("fx_unread_lie", True):
+            add(self._fx_unread_lie, 3)
+        if self.get_setting("fx_image", True):
+            add(self._fx_image, 4)
+        if self.get_setting("fx_sound", True):
+            add(self._fx_sound, 4)
+        if self.get_setting("fx_silence_scare", True):
+            add(self._fx_silence_scare, 3)
+        if self.get_setting("fx_open_camera", True):
+            add(self._fx_open_camera, 2)
+        if self.get_setting("fx_shutter", True):
+            add(self._fx_shutter, 3)
+        if self.get_setting("fx_cam_preview", True):
+            add(self._fx_cam_preview, 3)
+        if self.get_setting("fx_phantom_call", True):
+            add(self._fx_phantom_call, 3)
+        if self.get_setting("fx_invert", True):
+            add(self._fx_invert, 2)
+        if self.get_setting("fx_gray", True):
+            add(self._fx_gray, 2)
+        if self.get_setting("fx_black", True):
+            add(self._fx_black, 2)
+        if self.get_setting("fx_shift", True):
+            add(self._fx_shift, 2)
+        if self.get_setting("fx_blur", True):
+            add(self._fx_blur, 1)
+        if self.get_setting("fx_drift", True):
+            add(self._fx_drift, 2)
+        if self.get_setting("fx_vignette", True):
+            add(self._fx_vignette, 2)
+        if self.get_setting("fx_time_lie", True):
+            add(self._fx_time_lie, 3)
+        if self.get_setting("fx_vibrate", True):
+            add(self._fx_vibrate, 2)
+        if self.get_setting("fx_ghost", True):
+            add(self._fx_ghost, 2)
+        if self.get_setting("fx_kick_chat", True):
+            add(self._fx_kick_chat, 1)
+        if self.get_setting("fx_lock_hint", True):
+            add(self._fx_lock_hint, 3)
+        if not bag:
+            return
+        fns = [b[0] for b in bag]
+        ws = [b[1] for b in bag]
+        pick = random.choices(fns, weights=ws, k=1)[0]
+        pick()
+        if pick == self._fx_image:
+            if self.get_setting("fx_sound", True):
+                self._fx_sound()
+            if self.get_setting("fx_vibrate", True):
+                self._fx_vibrate()
+        if pick == self._fx_open_camera and self.get_setting("fx_front_hint", True):
+            self._fx_lens_banner()
+        if random.random() < 0.5 and len(fns) > 1:
+            random.choices(fns, weights=ws, k=1)[0]()
+        if random.random() < 0.22 and len(fns) > 2:
+            random.choices(fns, weights=ws, k=1)[0]()
+
+    def _full_scare(self):
+        if not self._fg():
+            return
+        _slog("полный скример")
+        if self.get_setting("fx_image", True) and self._bitmaps:
+            self._fx_image(hold=(1.0, 2.0))
+        elif self.get_setting("fx_black", True):
+            self._fx_black()
+        if self.get_setting("fx_sound", True):
+            self._fx_sound()
+            if self.get_setting("fx_double_hit", True):
+                threading.Timer(0.22, lambda: run_on_ui_thread(self._fx_sound)).start()
+                threading.Timer(0.55, lambda: run_on_ui_thread(self._fx_sound)).start()
+        if self.get_setting("fx_vibrate", True):
+            self._fx_vibrate()
+        if self.get_setting("fx_blood_text", True):
+            threading.Timer(0.15, lambda: run_on_ui_thread(self._fx_blood)).start()
+        if self.get_setting("fx_sys_notify", True):
+            threading.Timer(0.1, lambda: run_on_ui_thread(self._fx_sys_notify)).start()
+        if self.get_setting("fx_invert", True):
+            threading.Timer(1.1, lambda: run_on_ui_thread(self._fx_invert)).start()
+        if self.get_setting("fx_swap_names", True):
+            threading.Timer(0.4, lambda: run_on_ui_thread(self._fx_swap_names)).start()
+        if self.get_setting("fx_phantom_call", True) and random.random() < 0.4:
+            threading.Timer(0.8, lambda: run_on_ui_thread(self._fx_phantom_call)).start()
+        if self.get_setting("fx_fake_msg", True) and random.random() < 0.65:
+            threading.Timer(1.0, lambda: run_on_ui_thread(self._fx_fake_msg)).start()
+        if self.get_setting("fx_open_camera", True) and random.random() < 0.3:
+            threading.Timer(1.5, lambda: run_on_ui_thread(self._fx_open_camera)).start()
+        if self.get_setting("fx_kill_app", False) and random.random() < self._kill_chance():
+            threading.Timer(2.0, lambda: run_on_ui_thread(self._fx_kill_app)).start()
+
+    # ── root helpers ──
+
+    def _root(self):
+        frag = get_last_fragment()
+        act = frag.getParentActivity() if frag else None
+        if not act:
+            return None, None
+        return act, act.getWindow().getDecorView()
+
+    def _content(self, decor):
+        try:
+            c = decor.findViewById(16908290)
+            return c if c is not None else decor
+        except Exception:
+            return decor
+
+    def _action_bar(self, frag):
+        ab = None
+        try:
+            from hook_utils import get_private_field
+            ab = get_private_field(frag, "actionBar")
+        except Exception:
+            pass
+        if ab is None:
+            try:
+                ab = frag.getActionBar()
+            except Exception:
+                pass
+        return ab
+
+    # ── sound / vibe ──
+
+    def _resolve_tones(self):
+        if self._tones is not None:
+            return self._tones
+        out = []
+        for name in TONE_NAMES:
+            try:
+                v = getattr(ToneGenerator, name, None)
+                if v is not None:
+                    out.append(int(v))
+            except Exception:
+                pass
+        if not out:
+            try:
+                out = [ToneGenerator.TONE_SUP_ERROR]
+            except Exception:
+                out = []
+        self._tones = out
+        return out
+
+    def _fx_sound(self):
+        try:
+            tones = self._resolve_tones()
+            if not tones:
+                return
+            lo, hi = self._vol()
+            vol = int(random.uniform(lo, hi))
+            stream = AudioManager.STREAM_MUSIC
+            am = None
+            prev = None
+            frag = get_last_fragment()
+            act = frag.getParentActivity() if frag else None
+            if act and self.get_setting("fx_boost_vol", True):
+                try:
+                    am = act.getSystemService(Context.AUDIO_SERVICE)
+                    prev = am.getStreamVolume(stream)
+                    mx = am.getStreamMaxVolume(stream)
+                    am.setStreamVolume(stream, min(max(prev, int(mx * vol / 100.0)), mx), 0)
+                except Exception:
+                    pass
+            tg = ToneGenerator(stream, min(100, vol + 10))
+            for i in range(random.randint(2, 5)):
+                tone = random.choice(tones)
+                dur = random.randint(180, 650)
+                try:
+                    tg.startTone(tone, dur)
+                    time.sleep(dur / 1000.0 + random.uniform(0.02, 0.12))
+                except Exception:
+                    break
+            try:
+                tg.release()
+            except Exception:
+                pass
+            if am is not None and prev is not None:
+                try:
+                    am.setStreamVolume(stream, prev, 0)
+                except Exception:
+                    pass
+        except Exception as e:
+            _slog("sound: %s" % e)
+
+    def _fx_vibrate(self):
+        try:
+            act, _ = self._root()
+            if not act:
+                return
+            vib = act.getSystemService(Context.VIBRATOR_SERVICE)
+            if vib is None or not vib.hasVibrator():
+                return
+            pattern = [0, 120, 40, 80, 30, 200, 20, 60, 20, 100, 40, 150, 30, 80]
+            if Build.VERSION.SDK_INT >= 26:
+                vib.vibrate(VibrationEffect.createWaveform(pattern, -1))
+            else:
+                vib.vibrate(pattern, -1)
+        except Exception as e:
+            _slog("vib: %s" % e)
+
+    def _fx_heartbeat(self):
+        try:
+            act, _ = self._root()
+            if not act:
+                return
+            vib = act.getSystemService(Context.VIBRATOR_SERVICE)
+            if vib is None or not vib.hasVibrator():
+                return
+            # тук … тук
+            pattern = [0, 45, 180, 45]
+            if Build.VERSION.SDK_INT >= 26:
+                vib.vibrate(VibrationEffect.createWaveform(pattern, -1))
+            else:
+                vib.vibrate(pattern, -1)
+        except Exception:
+            pass
+
+    def _fx_silence_scare(self):
+        """Mute media 5–8 sec then scare."""
+        try:
+            act, _ = self._root()
+            if not act:
+                return
+            am = act.getSystemService(Context.AUDIO_SERVICE)
+            stream = AudioManager.STREAM_MUSIC
+            prev = am.getStreamVolume(stream)
+            am.setStreamVolume(stream, 0, 0)
+            hold = random.uniform(5.0, 8.0)
+
+            def restore_and_hit():
+                try:
+                    am.setStreamVolume(stream, prev, 0)
+                except Exception:
+                    pass
+                if self.get_setting("fx_image", True) and self._bitmaps:
+                    self._fx_image(hold=(0.7, 1.3))
+                if self.get_setting("fx_sound", True):
+                    self._fx_sound()
+                if self.get_setting("fx_vibrate", True):
+                    self._fx_vibrate()
+
+            threading.Timer(hold, lambda: run_on_ui_thread(restore_and_hit)).start()
+        except Exception as e:
+            _slog("silence: %s" % e)
+
+    # ── images ──
+
+    def _fetch_images(self):
+        if self._bitmaps:
+            return
+        got = []
+        for url in SCARE_URLS:
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=12) as r:
+                    data = r.read()
+                bm = BitmapFactory.decodeByteArray(data, 0, len(data))
+                if bm is not None:
+                    got.append(bm)
+            except Exception as e:
+                _slog("img: %s" % e)
+        self._bitmaps = got
+        _slog("лиц: %s" % len(got))
+
+    def _fx_image(self, hold=(0.5, 1.1)):
+        try:
+            if not self._bitmaps:
+                threading.Thread(target=self._fetch_images, daemon=True).start()
+                return
+            act, decor = self._root()
+            if not act:
+                return
+            iv = ImageView(act)
+            iv.setImageBitmap(random.choice(self._bitmaps))
+            iv.setScaleType(ImageView.ScaleType.CENTER_CROP)
+            iv.setBackgroundColor(Color.BLACK)
+            iv.setClickable(False)
+            try:
+                iv.setElevation(1000000.0)
+            except Exception:
+                pass
+            lo, hi = hold
+
+            def add():
+                try:
+                    decor.addView(iv, ViewGroup.LayoutParams(-1, -1))
+                    decor.bringChildToFront(iv)
+                except Exception as e:
+                    _slog("img add: %s" % e)
+
+            def rm():
+                try:
+                    decor.removeView(iv)
+                except Exception:
+                    pass
+
+            run_on_ui_thread(add)
+            threading.Timer(random.uniform(lo, hi), lambda: run_on_ui_thread(rm)).start()
+        except Exception as e:
+            _slog("image: %s" % e)
+
+    def _circle(self, bitmap, size):
+        try:
+            scaled = Bitmap.createScaledBitmap(bitmap, size, size, True)
+            out = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+            c = Canvas(out)
+            p = Paint(Paint.ANTI_ALIAS_FLAG)
+            p.setShader(BitmapShader(scaled, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP))
+            r = size / 2.0
+            c.drawCircle(r, r, r, p)
+            return out
+        except Exception:
+            return bitmap
+
+    # ── screen matrix / overlay ──
+
+    def _apply_matrix(self, matrix_values, seconds):
+        try:
+            act, decor = self._root()
+            if not act:
+                return
+            target = self._content(decor)
+            cm = ColorMatrix(matrix_values)
+            paint = Paint()
+            paint.setColorFilter(ColorMatrixColorFilter(cm))
+
+            def on():
+                try:
+                    target.setLayerType(View.LAYER_TYPE_HARDWARE, paint)
+                except Exception:
+                    pass
+
+            def off():
+                try:
+                    target.setLayerType(View.LAYER_TYPE_NONE, None)
+                except Exception:
+                    pass
+
+            run_on_ui_thread(on)
+            threading.Timer(seconds, lambda: run_on_ui_thread(off)).start()
+        except Exception as e:
+            _slog("matrix: %s" % e)
+
+    def _fx_invert(self):
+        inv = [-1, 0, 0, 0, 255, 0, -1, 0, 0, 255, 0, 0, -1, 0, 255, 0, 0, 0, 1, 0]
+        self._apply_matrix(inv, random.uniform(1.6, 3.8))
+
+    def _fx_gray(self):
+        g = [0.33, 0.33, 0.33, 0, 0, 0.33, 0.33, 0.33, 0, 0, 0.33, 0.33, 0.33, 0, 0, 0, 0, 0, 1, 0]
+        self._apply_matrix(g, random.uniform(2.0, 4.5))
+
+    def _fx_black(self):
+        try:
+            act, decor = self._root()
+            if not act:
+                return
+            target = self._content(decor)
+            v = View(act)
+            v.setBackgroundColor(Color.BLACK)
+
+            def add():
+                try:
+                    target.addView(v, ViewGroup.LayoutParams(-1, -1))
+                except Exception:
+                    pass
+
+            def rm():
+                try:
+                    target.removeView(v)
+                except Exception:
+                    pass
+
+            run_on_ui_thread(add)
+            threading.Timer(random.uniform(0.25, 0.55), lambda: run_on_ui_thread(rm)).start()
+        except Exception as e:
+            _slog("black: %s" % e)
+
+    def _fx_shift(self):
+        try:
+            act, decor = self._root()
+            if not act:
+                return
+            target = self._content(decor)
+            dx, dy = random.uniform(-80, 80), random.uniform(-50, 50)
+
+            def go():
+                try:
+                    target.setTranslationX(dx)
+                    target.setTranslationY(dy)
+                except Exception:
+                    pass
+
+            def back():
+                try:
+                    target.setTranslationX(0)
+                    target.setTranslationY(0)
+                except Exception:
+                    pass
+
+            run_on_ui_thread(go)
+            threading.Timer(random.uniform(0.12, 0.4), lambda: run_on_ui_thread(back)).start()
+        except Exception as e:
+            _slog("shift: %s" % e)
+
+    def _fx_blur(self):
+        try:
+            if Build.VERSION.SDK_INT < 31:
+                return
+            from android.graphics import RenderEffect
+            act, decor = self._root()
+            if not act:
+                return
+            target = self._content(decor)
+            r = random.uniform(18, 40)
+
+            def on():
+                try:
+                    target.setRenderEffect(RenderEffect.createBlurEffect(r, r, Shader.TileMode.CLAMP))
+                except Exception:
+                    pass
+
+            def off():
+                try:
+                    target.setRenderEffect(None)
+                except Exception:
+                    pass
+
+            run_on_ui_thread(on)
+            threading.Timer(random.uniform(1.0, 2.2), lambda: run_on_ui_thread(off)).start()
+        except Exception as e:
+            _slog("blur: %s" % e)
+
+    def _fx_drift(self):
+        """Медленный почти незаметный дрейф 20–40 сек."""
+        try:
+            act, decor = self._root()
+            if not act:
+                return
+            target = self._content(decor)
+            steps = random.randint(8, 14)
+            total = random.uniform(20.0, 40.0)
+            dx = random.uniform(-25, 25)
+            dy = random.uniform(-18, 18)
+            sc = random.uniform(0.97, 1.03)
+
+            def step(i, x, y, s):
+                if i >= steps:
+                    try:
+                        target.setTranslationX(0)
+                        target.setTranslationY(0)
+                        target.setScaleX(1)
+                        target.setScaleY(1)
+                    except Exception:
+                        pass
+                    return
+                try:
+                    target.setTranslationX(x)
+                    target.setTranslationY(y)
+                    target.setScaleX(s)
+                    target.setScaleY(s)
+                except Exception:
+                    pass
+                nx = x + dx / steps
+                ny = y + dy / steps
+                ns = s + (sc - 1) / steps
+                threading.Timer(
+                    total / steps,
+                    lambda: run_on_ui_thread(lambda: step(i + 1, nx, ny, ns)),
+                ).start()
+
+            run_on_ui_thread(lambda: step(0, 0, 0, 1.0))
+        except Exception as e:
+            _slog("drift: %s" % e)
+
+    def _fx_vignette(self):
+        try:
+            act, decor = self._root()
+            if not act:
+                return
+            target = self._content(decor)
+            overlays = []
+            # 4 края
+            edges = [
+                (ViewGroup.LayoutParams(-1, int(target.getHeight() * 0.12) if target.getHeight() > 0 else 120), 0, 0),  # top
+            ]
+            # simpler: one semi-transparent black frame using 4 views
+            h = target.getHeight() or 1200
+            w = target.getWidth() or 800
+            specs = [
+                (-1, int(h * 0.14), 0, 0),
+                (-1, int(h * 0.14), 0, h - int(h * 0.14)),
+                (int(w * 0.1), -1, 0, 0),
+                (int(w * 0.1), -1, w - int(w * 0.1), 0),
+            ]
+            for ww, hh, l, t in specs:
+                v = View(act)
+                v.setBackgroundColor(0xBB000000)
+                v.setClickable(False)
+                lp = ViewGroup.MarginLayoutParams(ww, hh)
+                lp.leftMargin = max(l, 0)
+                lp.topMargin = max(t, 0)
+                try:
+                    target.addView(v, lp)
+                    overlays.append(v)
+                except Exception:
+                    pass
+
+            def rm():
+                for v in overlays:
+                    try:
+                        target.removeView(v)
+                    except Exception:
+                        pass
+
+            threading.Timer(random.uniform(4.0, 10.0), lambda: run_on_ui_thread(rm)).start()
+        except Exception as e:
+            _slog("vignette: %s" % e)
+
+    # ── text / names ──
+
+    def _fx_whisper(self):
+        try:
+            frag = get_last_fragment()
+            phrase = random.choice(WHISPERS)
+            if random.random() < 0.45 or frag is None:
+                BulletinHelper.show_info(phrase, frag)
+                return
+            act = frag.getParentActivity()
+            if not act:
+                BulletinHelper.show_info(phrase, frag)
+                return
+            b = AlertDialogBuilder(act)
+            b.set_title(random.choice(SCARE_TITLES))
+            b.set_message(phrase)
+            b.set_positive_button("…", lambda d, w=None: d.dismiss())
+            b.show()
+        except Exception as e:
+            _slog("whisper: %s" % e)
+
+    def _fx_blood(self):
+        try:
+            act, decor = self._root()
+            if not act:
+                return
+            target = self._content(decor)
+            w, h = target.getWidth(), target.getHeight()
+            if w <= 0 or h <= 0:
+                return
+            tv = TextView(act)
+            tv.setText(random.choice(WHISPERS))
+            tv.setTextColor(Color.RED)
+            tv.setTextSize(random.uniform(18, 32))
+            try:
+                tv.setTypeface(Typeface.DEFAULT_BOLD)
+            except Exception:
+                pass
+            tv.setClickable(False)
+            lp = ViewGroup.MarginLayoutParams(-2, -2)
+            lp.leftMargin = random.randint(0, max(w - 220, 0))
+            lp.topMargin = random.randint(0, max(h - 120, 0))
+
+            def add():
+                try:
+                    target.addView(tv, lp)
+                except Exception:
+                    pass
+
+            def rm():
+                try:
+                    target.removeView(tv)
+                except Exception:
+                    pass
+
+            run_on_ui_thread(add)
+            threading.Timer(random.uniform(1.0, 2.8), lambda: run_on_ui_thread(rm)).start()
+        except Exception as e:
+            _slog("blood: %s" % e)
+
+    def _fx_swap_names(self):
+        try:
+            frag = get_last_fragment()
+            if frag is None:
+                return
+            ab = self._action_bar(frag)
+            if ab is None:
+                return
+            scary = random.choice(FAKE_NAMES)
+            sub = random.choice([
+                "был(а) только что… или нет", "в сети ☠️", "печатает чужими руками",
+                "1 участник (ложное)", "онлайн · запись", "смотрит на тебя",
+            ])
+            old_title = old_sub = None
+            try:
+                old_title = str(ab.getTitle()) if ab.getTitle() else None
+            except Exception:
+                pass
+            try:
+                old_sub = str(ab.getSubtitle()) if ab.getSubtitle() else None
+            except Exception:
+                pass
+            mixed = scary
+            if old_title:
+                style = random.choice([
+                    "{orig} / {bad}", "{bad} ({orig})", "{orig} · {bad}",
+                    "{bad} — это {orig}?", "{orig}… нет, {bad}",
+                ])
+                mixed = style.format(orig=old_title, bad=scary)
+            try:
+                ab.setTitle(mixed)
+            except Exception:
+                pass
+            try:
+                ab.setSubtitle(sub if not old_sub else "%s / %s" % (old_sub, sub))
+            except Exception:
+                pass
+            hold = random.uniform(5.0, 12.0)
+
+            def restore():
+                try:
+                    if old_title is not None:
+                        ab.setTitle(old_title)
+                    if old_sub is not None:
+                        ab.setSubtitle(old_sub)
+                except Exception:
+                    pass
+
+            threading.Timer(hold, lambda: run_on_ui_thread(restore)).start()
+        except Exception as e:
+            _slog("names: %s" % e)
+
+    def _fx_dead_status(self):
+        try:
+            frag = get_last_fragment()
+            if not frag:
+                return
+            ab = self._action_bar(frag)
+            if not ab:
+                return
+            old = None
+            try:
+                old = str(ab.getSubtitle()) if ab.getSubtitle() else None
+            except Exception:
+                pass
+            dead = random.choice([
+                "был(а) очень давно", "не в сети с похорон", "последний раз: 3:33",
+                "статус недоступен", "был(а)… и исчез", "оффлайн навсегда",
+            ])
+            try:
+                ab.setSubtitle(dead)
+            except Exception:
+                return
+
+            def restore():
+                try:
+                    if old is not None:
+                        ab.setSubtitle(old)
+                except Exception:
+                    pass
+
+            threading.Timer(random.uniform(4.0, 9.0), lambda: run_on_ui_thread(restore)).start()
+        except Exception as e:
+            _slog("dead: %s" % e)
+
+    def _fx_time_lie(self):
+        try:
+            frag = get_last_fragment()
+            if not frag:
+                return
+            ab = self._action_bar(frag)
+            if not ab:
+                return
+            old = None
+            try:
+                old = str(ab.getSubtitle()) if ab.getSubtitle() else None
+            except Exception:
+                pass
+            try:
+                ab.setSubtitle(random.choice(["3:33", "время остановилось", "00:00", "––:––"]))
+            except Exception:
+                return
+
+            def restore():
+                try:
+                    if old is not None:
+                        ab.setSubtitle(old)
+                except Exception:
+                    pass
+
+            threading.Timer(random.uniform(3.0, 7.0), lambda: run_on_ui_thread(restore)).start()
+        except Exception as e:
+            _slog("time: %s" % e)
+
+    def _fx_typing(self):
+        try:
+            frag = get_last_fragment()
+            if not frag:
+                return
+            ab = self._action_bar(frag)
+            if not ab:
+                return
+            old = None
+            try:
+                old = str(ab.getSubtitle()) if ab.getSubtitle() else None
+            except Exception:
+                pass
+            try:
+                ab.setSubtitle(random.choice(["печатает…", "записывает голос…", "онлайн"]))
+            except Exception:
+                return
+            threading.Timer(
+                random.uniform(3.0, 8.0),
+                lambda: run_on_ui_thread(lambda: self._restore_sub(ab, old)),
+            ).start()
+        except Exception as e:
+            _slog("typing: %s" % e)
+
+    def _restore_sub(self, ab, old):
+        try:
+            if old is not None:
+                ab.setSubtitle(old)
+        except Exception:
+            pass
+
+    def _fx_input_glitch(self):
+        """Подменяет текст в первом найденном EditText."""
+        try:
+            act, decor = self._root()
+            if not act:
+                return
+            edits = []
+            self._find_edits(self._content(decor), edits, 0)
+            if not edits:
+                return
+            et = random.choice(edits)
+            old = ""
+            try:
+                old = str(et.getText())
+            except Exception:
+                pass
+            horror = random.choice([
+                "не пиши это", "он читает", "забудь", "МОРГ",
+                "я уже здесь", "не отправляй",
+            ])
+            try:
+                et.setText(horror)
+            except Exception:
+                return
+
+            def restore():
+                try:
+                    et.setText(old)
+                except Exception:
+                    pass
+
+            threading.Timer(random.uniform(1.5, 3.5), lambda: run_on_ui_thread(restore)).start()
+        except Exception as e:
+            _slog("input: %s" % e)
+
+    def _find_edits(self, view, out, depth):
+        if view is None or depth > 14 or len(out) > 8:
+            return
+        try:
+            if isinstance(view, EditText):
+                out.append(view)
+        except Exception:
+            pass
+        try:
+            if isinstance(view, ViewGroup):
+                n = view.getChildCount()
+                for i in range(n):
+                    self._find_edits(view.getChildAt(i), out, depth + 1)
+        except Exception:
+            pass
+
+    def _scan_code_words(self):
+        try:
+            act, decor = self._root()
+            if not act:
+                return
+            edits = []
+            self._find_edits(self._content(decor), edits, 0)
+            for et in edits:
+                try:
+                    txt = str(et.getText()).lower().strip()
+                except Exception:
+                    continue
+                for w in CODE_WORDS:
+                    if w in txt:
+                        _slog("код-слово: %s" % w)
+                        try:
+                            et.setText("")
+                        except Exception:
+                            pass
+                        self._full_scare()
+                        return
+        except Exception:
+            pass
+
+    def _fx_bubble_glitch(self):
+        """Оверлей жуткого текста поверх чата."""
+        try:
+            act, decor = self._root()
+            if not act:
+                return
+            target = self._content(decor)
+            w, h = target.getWidth(), target.getHeight()
+            if w <= 0 or h <= 0:
+                return
+            box = LinearLayout(act)
+            box.setOrientation(LinearLayout.VERTICAL)
+            box.setPadding(28, 20, 28, 20)
+            bg = GradientDrawable()
+            bg.setColor(0xEE1A1A1A)
+            bg.setCornerRadius(24)
+            box.setBackground(bg)
+            tv = TextView(act)
+            tv.setText(random.choice(FAKE_BUBBLES + WHISPERS))
+            tv.setTextColor(Color.WHITE)
+            tv.setTextSize(15)
+            box.addView(tv)
+            lp = ViewGroup.MarginLayoutParams(-2, -2)
+            lp.leftMargin = random.randint(20, max(w // 3, 20))
+            lp.topMargin = random.randint(int(h * 0.2), int(h * 0.7))
+
+            def add():
+                try:
+                    target.addView(box, lp)
+                except Exception:
+                    pass
+
+            def rm():
+                try:
+                    target.removeView(box)
+                except Exception:
+                    pass
+
+            run_on_ui_thread(add)
+            threading.Timer(random.uniform(1.2, 2.5), lambda: run_on_ui_thread(rm)).start()
+        except Exception as e:
+            _slog("bubble: %s" % e)
+
+    def _fx_fake_react(self):
+        try:
+            act, decor = self._root()
+            if not act:
+                return
+            target = self._content(decor)
+            w, h = target.getWidth(), target.getHeight()
+            if w <= 0 or h <= 0:
+                return
+            tv = TextView(act)
+            tv.setText(random.choice(["💀", "👁️", "💀👁️", "🖤", "☠️"]))
+            tv.setTextSize(random.uniform(22, 36))
+            tv.setClickable(False)
+            lp = ViewGroup.MarginLayoutParams(-2, -2)
+            lp.leftMargin = random.randint(40, max(w - 80, 40))
+            lp.topMargin = random.randint(int(h * 0.15), int(h * 0.75))
+
+            def add():
+                try:
+                    target.addView(tv, lp)
+                except Exception:
+                    pass
+
+            def rm():
+                try:
+                    target.removeView(tv)
+                except Exception:
+                    pass
+
+            run_on_ui_thread(add)
+            threading.Timer(random.uniform(1.5, 4.0), lambda: run_on_ui_thread(rm)).start()
+        except Exception as e:
+            _slog("react: %s" % e)
+
+    def _fx_unread_lie(self):
+        try:
+            BulletinHelper.show_error(random.choice([
+                "99+ непрочитанных",
+                "1 новое от МОРГ",
+                "непрочитанное: не открывай",
+                "уведомление скрыто",
+            ]))
+        except Exception:
+            pass
+
+    def _fx_ghost(self):
+        try:
+            act, decor = self._root()
+            if not act:
+                return
+            target = self._content(decor)
+            w, h = target.getWidth(), target.getHeight()
+            if w <= 0 or h <= 0:
+                return
+            size = random.randint(50, 90)
+            dot = View(act)
+            dot.setClickable(False)
+            gd = GradientDrawable()
+            gd.setShape(GradientDrawable.OVAL)
+            gd.setColor(0x66FF0000 if random.random() < 0.4 else 0x55FFFFFF)
+            dot.setBackground(gd)
+            lp = ViewGroup.MarginLayoutParams(size, size)
+            lp.leftMargin = random.randint(0, max(w - size, 0))
+            lp.topMargin = random.randint(0, max(h - size, 0))
+
+            def add():
+                try:
+                    target.addView(dot, lp)
+                except Exception:
+                    pass
+
+            def rm():
+                try:
+                    target.removeView(dot)
+                except Exception:
+                    pass
+
+            run_on_ui_thread(add)
+            threading.Timer(random.uniform(0.2, 0.55), lambda: run_on_ui_thread(rm)).start()
+        except Exception as e:
+            _slog("ghost: %s" % e)
+
+    def _fx_fake_msg(self):
+        try:
+            act, decor = self._root()
+            if not act:
+                return
+            target = self._content(decor)
+            w, h = target.getWidth(), target.getHeight()
+            if w <= 0 or h <= 0:
+                return
+            av_size = 86
+            av = ImageView(act)
+            av.setClickable(False)
+            if self._bitmaps:
+                av.setImageBitmap(self._circle(random.choice(self._bitmaps), av_size))
+            else:
+                gd = GradientDrawable()
+                gd.setShape(GradientDrawable.OVAL)
+                gd.setColor(Color.BLACK)
+                av.setBackground(gd)
+            name = TextView(act)
+            name.setText(random.choice(FAKE_NAMES))
+            name.setTextColor(Color.RED)
+            name.setTextSize(13)
+            msg = TextView(act)
+            msg.setText(random.choice(FAKE_BUBBLES))
+            msg.setTextColor(Color.WHITE)
+            msg.setTextSize(15)
+            col = LinearLayout(act)
+            col.setOrientation(LinearLayout.VERTICAL)
+            col.addView(name)
+            col.addView(msg)
+            bubble = LinearLayout(act)
+            bubble.setOrientation(LinearLayout.HORIZONTAL)
+            bubble.setPadding(22, 18, 22, 18)
+            bg = GradientDrawable()
+            bg.setColor(-300279270)
+            bg.setCornerRadius(28)
+            bubble.setBackground(bg)
+            alp = LinearLayout.LayoutParams(av_size, av_size)
+            alp.rightMargin = 16
+            bubble.addView(av, alp)
+            bubble.addView(col)
+            lp = ViewGroup.MarginLayoutParams(-2, -2)
+            lp.leftMargin = random.randint(24, max(w - 480, 24))
+            lp.topMargin = random.randint(int(h * 0.12), int(h * 0.65))
+
+            def add():
+                try:
+                    target.addView(bubble, lp)
+                except Exception:
+                    pass
+
+            def rm():
+                try:
+                    target.removeView(bubble)
+                except Exception:
+                    pass
+
+            run_on_ui_thread(add)
+            threading.Timer(random.uniform(2.8, 5.0), lambda: run_on_ui_thread(rm)).start()
+        except Exception as e:
+            _slog("fake msg: %s" % e)
+
+    # ── camera / notify / call ──
+
+    def _fx_sys_notify(self):
+        try:
+            titles = ["Камера", "Микрофон", "МОРГ", "Неизвестный", "Система", "Доступ", "Запись"]
+            bodies = [
+                "Камера была включена", "Микрофон активен 00:03", "Кто-то поблизости",
+                "Новое лицо в кадре", "Запись экрана началась", "Неизвестный вход",
+                "МОРГ получил доступ к камере", "Геолокация передана",
+                random.choice(WHISPERS),
+            ]
+            title, body = random.choice(titles), random.choice(bodies)
+            try:
+                BulletinHelper.show_error("%s: %s" % (title, body))
+            except Exception:
+                pass
+            act, _ = self._root()
+            if act is None:
+                return
+            try:
+                from android.app import Notification, NotificationManager, NotificationChannel
+                nm = act.getSystemService(Context.NOTIFICATION_SERVICE)
+                channel_id = "morgue_horror"
+                if Build.VERSION.SDK_INT >= 26:
+                    ch = NotificationChannel(channel_id, "МОРГ", NotificationManager.IMPORTANCE_HIGH)
+                    nm.createNotificationChannel(ch)
+                    builder = Notification.Builder(act, channel_id)
+                else:
+                    builder = Notification.Builder(act)
+                builder.setContentTitle(title)
+                builder.setContentText(body)
+                builder.setSmallIcon(act.getApplicationInfo().icon)
+                builder.setAutoCancel(True)
+                try:
+                    builder.setPriority(Notification.PRIORITY_HIGH)
+                except Exception:
+                    pass
+                nm.notify(random.randint(90000, 99999), builder.build())
+            except Exception as e:
+                _slog("notify sys: %s" % e)
+        except Exception as e:
+            _slog("notify: %s" % e)
+
+    def _fx_echo_notify(self):
+        try:
+            msg = random.choice(WHISPERS)
+            BulletinHelper.show_info(msg)
+            threading.Timer(
+                0.55,
+                lambda: run_on_ui_thread(lambda: BulletinHelper.show_error("…%s" % msg)),
+            ).start()
+            if self.get_setting("fx_sound", True) and random.random() < 0.5:
+                threading.Timer(0.5, lambda: run_on_ui_thread(self._fx_sound)).start()
+        except Exception as e:
+            _slog("echo: %s" % e)
+
+    def _fx_open_camera(self):
+        try:
+            act, _ = self._root()
+            if act is None:
+                return
+            intent = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
+            try:
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            except Exception:
+                pass
+            act.startActivity(intent)
+            if self.get_setting("fx_front_hint", True):
+                threading.Timer(0.4, lambda: run_on_ui_thread(self._fx_lens_banner)).start()
+            if self.get_setting("fx_sound", True):
+                threading.Timer(0.1, lambda: run_on_ui_thread(self._fx_sound)).start()
+        except Exception as e:
+            _slog("camera: %s" % e)
+            try:
+                BulletinHelper.show_error("камера открыта · не смотри")
+            except Exception:
+                pass
+
+    def _fx_shutter(self):
+        """Белая вспышка + короткий звук."""
+        try:
+            act, decor = self._root()
+            if not act:
+                return
+            target = self._content(decor)
+            v = View(act)
+            v.setBackgroundColor(Color.WHITE)
+
+            def add():
+                try:
+                    target.addView(v, ViewGroup.LayoutParams(-1, -1))
+                except Exception:
+                    pass
+
+            def rm():
+                try:
+                    target.removeView(v)
+                except Exception:
+                    pass
+
+            run_on_ui_thread(add)
+            threading.Timer(random.uniform(0.08, 0.18), lambda: run_on_ui_thread(rm)).start()
+            if self.get_setting("fx_sound", True):
+                self._fx_sound()
+        except Exception as e:
+            _slog("shutter: %s" % e)
+
+    def _fx_cam_preview(self):
+        try:
+            act, decor = self._root()
+            if not act:
+                return
+            target = self._content(decor)
+            box = LinearLayout(act)
+            box.setOrientation(LinearLayout.VERTICAL)
+            box.setPadding(16, 12, 16, 12)
+            box.setBackgroundColor(0xEE000000)
+            t1 = TextView(act)
+            t1.setText("CAM 0 · REC ●")
+            t1.setTextColor(Color.RED)
+            t1.setTextSize(13)
+            t2 = TextView(act)
+            t2.setText(random.choice(["00:03", "00:07", "лицо в кадре", "REC"]))
+            t2.setTextColor(Color.WHITE)
+            t2.setTextSize(11)
+            box.addView(t1)
+            box.addView(t2)
+            lp = ViewGroup.MarginLayoutParams(-2, -2)
+            lp.leftMargin = 24
+            lp.topMargin = 100
+
+            def add():
+                try:
+                    target.addView(box, lp)
+                except Exception:
+                    pass
+
+            def rm():
+                try:
+                    target.removeView(box)
+                except Exception:
+                    pass
+
+            run_on_ui_thread(add)
+            threading.Timer(random.uniform(2.5, 5.0), lambda: run_on_ui_thread(rm)).start()
+        except Exception as e:
+            _slog("cam prev: %s" % e)
+
+    def _fx_lens_banner(self):
+        try:
+            act, decor = self._root()
+            if not act:
+                return
+            target = self._content(decor)
+            tv = TextView(act)
+            tv.setText(random.choice([
+                "СМОТРИ В ОБЪЕКТИВ", "Я ВИЖУ ТЕБЯ", "НЕ ОТВОРАЧИВАЙСЯ",
+                "ЗАПИСЬ ИДЁТ", "УЛЫБНИСЬ",
+            ]))
+            tv.setTextColor(Color.RED)
+            tv.setTextSize(random.uniform(26, 40))
+            try:
+                tv.setTypeface(Typeface.DEFAULT_BOLD)
+            except Exception:
+                pass
+            tv.setGravity(17)
+            tv.setClickable(False)
+
+            def add():
+                try:
+                    target.addView(tv, ViewGroup.LayoutParams(-1, -2))
+                except Exception:
+                    pass
+
+            def rm():
+                try:
+                    target.removeView(tv)
+                except Exception:
+                    pass
+
+            run_on_ui_thread(add)
+            threading.Timer(random.uniform(1.5, 3.5), lambda: run_on_ui_thread(rm)).start()
+        except Exception as e:
+            _slog("lens: %s" % e)
+
+    def _fx_phantom_call(self):
+        """Оверлей входящего звонка."""
+        try:
+            act, decor = self._root()
+            if not act:
+                return
+            target = self._content(decor)
+            root = LinearLayout(act)
+            root.setOrientation(LinearLayout.VERTICAL)
+            root.setBackgroundColor(0xF0101010)
+            root.setPadding(40, 120, 40, 80)
+            root.setClickable(True)
+            name = TextView(act)
+            name.setText(random.choice(["Unknown", "МОРГ", "Неизвестный", "000-000", "я"]))
+            name.setTextColor(Color.WHITE)
+            name.setTextSize(28)
+            name.setGravity(17)
+            sub = TextView(act)
+            sub.setText(random.choice(["входящий…", "шифрованный звонок", "не сбрасывай"]))
+            sub.setTextColor(0xFFAAAAAA)
+            sub.setTextSize(16)
+            sub.setGravity(17)
+            btn = TextView(act)
+            btn.setText("  сбросить  ")
+            btn.setTextColor(Color.WHITE)
+            btn.setTextSize(18)
+            btn.setPadding(40, 24, 40, 24)
+            gd = GradientDrawable()
+            gd.setColor(0xFFCC2222)
+            gd.setCornerRadius(40)
+            btn.setBackground(gd)
+            btn.setGravity(17)
+            root.addView(name)
+            root.addView(sub)
+            spacer = View(act)
+            root.addView(spacer, LinearLayout.LayoutParams(-1, 80))
+            root.addView(btn)
+
+            def add():
+                try:
+                    target.addView(root, ViewGroup.LayoutParams(-1, -1))
+                except Exception:
+                    pass
+
+            def rm():
+                try:
+                    target.removeView(root)
+                except Exception:
+                    pass
+
+            from java import dynamic_proxy
+
+            class Click(dynamic_proxy(View.OnClickListener)):
+                def onClick(self, v):
+                    rm()
+
+            btn.setOnClickListener(Click())
+            run_on_ui_thread(add)
+            if self.get_setting("fx_sound", True):
+                self._fx_sound()
+            threading.Timer(random.uniform(6.0, 12.0), lambda: run_on_ui_thread(rm)).start()
+        except Exception as e:
+            _slog("call: %s" % e)
+
+    def _fx_lock_hint(self):
+        try:
+            act, decor = self._root()
+            if not act:
+                return
+            target = self._content(decor)
+            box = LinearLayout(act)
+            box.setOrientation(LinearLayout.VERTICAL)
+            box.setBackgroundColor(Color.BLACK)
+            box.setPadding(40, 80, 40, 80)
+            box.setClickable(True)
+            t1 = TextView(act)
+            t1.setText(random.choice(["ЗАБЛОКИРОВАНО", "МОРГ", "НЕТ ДОСТУПА", "..."]))
+            t1.setTextColor(Color.RED)
+            t1.setTextSize(28)
+            t2 = TextView(act)
+            t2.setText(random.choice([
+                "введи код, которого нет", "лицо не распознано",
+                "ты не хозяин", "попытка 3/3",
+            ]))
+            t2.setTextColor(Color.WHITE)
+            t2.setTextSize(16)
+            box.addView(t1)
+            box.addView(t2)
+
+            def add():
+                try:
+                    target.addView(box, ViewGroup.LayoutParams(-1, -1))
+                except Exception:
+                    pass
+
+            def rm():
+                try:
+                    target.removeView(box)
+                except Exception:
+                    pass
+
+            run_on_ui_thread(add)
+            threading.Timer(random.uniform(1.2, 2.8), lambda: run_on_ui_thread(rm)).start()
+            if self.get_setting("fx_sound", True) and random.random() < 0.7:
+                self._fx_sound()
+        except Exception as e:
+            _slog("lock: %s" % e)
+
+    def _fx_kick_chat(self):
+        try:
+            frag = get_last_fragment()
+            act = frag.getParentActivity() if frag else None
+            if act:
+                act.onBackPressed()
+        except Exception as e:
+            _slog("kick: %s" % e)
+
+    def _fx_kill_app(self):
+        try:
+            act, _ = self._root()
+            if not act:
+                return
+            _slog("finish")
+            try:
+                act.finishAffinity()
+            except Exception:
+                act.finish()
+        except Exception as e:
+            _slog("kill: %s" % e)

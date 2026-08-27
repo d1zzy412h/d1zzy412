@@ -1,0 +1,1099 @@
+__id__ = "Sticker_tab"
+__name__ = "Sticker tab"
+__author__ = "@d1zzy412 "
+__version__ = "1.0.0"
+__description__ = """вкладка стикеров в профиле чата: поиск по истории, эмодзи и дате"""
+
+__icon__ = "rfbrtrfbrt_rfbrt_by_TgEmodziBot/3"
+__min_version__ = "12.5.1"
+__app_version__ = ">=12.5.1"
+__sdk_version__ = ">=1.4.3.3"
+
+from base_plugin import BasePlugin, MethodHook
+from hook_utils import get_private_field
+from client_utils import (
+    get_last_fragment, get_messages_controller,
+    send_request, RequestCallback,
+)
+from android_utils import run_on_ui_thread
+from ui.bulletin import BulletinHelper
+
+from java import dynamic_proxy, cast
+from java.lang import System, Class as jclass
+from android.view import View, Gravity, MotionEvent, WindowManager, ViewGroup
+from android.view.inputmethod import InputMethodManager
+from android.content import Context as AndroidContext
+from android.widget import (
+    LinearLayout, FrameLayout, TextView, ScrollView,
+    HorizontalScrollView, EditText, ImageView,
+)
+from android.text import TextWatcher
+from android.graphics import Typeface, Color, BitmapFactory, PorterDuff, PorterDuffColorFilter
+from android.graphics.drawable import GradientDrawable, Drawable
+from android.os import Bundle
+from android.provider import MediaStore
+
+from org.telegram.messenger import (
+    AndroidUtilities, ApplicationLoader, FileLoader,
+    ImageLocation, MediaDataController, UserConfig,
+)
+from org.telegram.tgnet import TLRPC
+from org.telegram.ui import ChatActivity
+from org.telegram.ui.ActionBar import Theme, AlertDialog, BottomSheet
+from org.telegram.ui.Components import BackupImageView, StickersAlert
+
+import threading
+import traceback
+import weakref
+from datetime import datetime
+
+
+PAGE = 80
+DEPTH = 500
+TAB = 11
+COLS = 5
+PAGE_UI = 40
+
+
+def dp(v):
+    return AndroidUtilities.dp(v)
+
+
+def _click(fn):
+    class L(dynamic_proxy(View.OnClickListener)):
+        def onClick(self, v):
+            try:
+                fn()
+            except Exception:
+                traceback.print_exc()
+    return L()
+
+
+def _long(fn):
+    class L(dynamic_proxy(View.OnLongClickListener)):
+        def onLongClick(self, v):
+            try:
+                fn()
+            except Exception:
+                traceback.print_exc()
+            return True
+    return L()
+
+
+def _watch(fn):
+    class W(dynamic_proxy(TextWatcher)):
+        def beforeTextChanged(self, s, start, count, after):
+            pass
+        def onTextChanged(self, s, start, before, count):
+            try:
+                fn(str(s) if s is not None else "")
+            except Exception:
+                traceback.print_exc()
+        def afterTextChanged(self, s):
+            pass
+    return W()
+
+
+def _c(key, fb):
+    try:
+        return Theme.getColor(key)
+    except Exception:
+        return Color.parseColor(fb)
+
+
+def _bg():
+    return _c(Theme.key_windowBackgroundWhite, "#0e0e0e")
+
+
+def _t1():
+    return _c(Theme.key_windowBackgroundWhiteBlackText, "#f0f0f0")
+
+
+def _t2():
+    return _c(Theme.key_windowBackgroundWhiteGrayText, "#888888")
+
+
+def _accent():
+    try:
+        return Theme.getColor(Theme.key_windowBackgroundWhiteBlueText4)
+    except Exception:
+        return Color.parseColor("#5b9cf5")
+
+
+def _chip_bg(active):
+    d = GradientDrawable()
+    if active:
+        d.setColor(_accent())
+        d.setAlpha(40)
+    else:
+        d.setColor(Color.parseColor("#1a1a1a"))
+    d.setCornerRadius(dp(20))
+    return d
+
+
+def _search_bg():
+    d = GradientDrawable()
+    d.setColor(Color.parseColor("#1a1a1a"))
+    d.setCornerRadius(dp(12))
+    return d
+
+
+def _round_btn(filled=False):
+    d = GradientDrawable()
+    if filled:
+        d.setColor(_accent())
+    else:
+        d.setColor(Color.TRANSPARENT)
+        d.setStroke(dp(1), _accent())
+    d.setCornerRadius(dp(10))
+    return d
+
+
+def _msg(act, title, text):
+    if act is None:
+        try:
+            BulletinHelper.show_info(text)
+        except Exception:
+            pass
+        return
+    try:
+        b = AlertDialog.Builder(act)
+        b.setTitle(title)
+        b.setMessage(text)
+        b.setPositiveButton("OK", None)
+        b.show()
+    except Exception:
+        try:
+            BulletinHelper.show_info(text)
+        except Exception:
+            pass
+
+
+class chat_stickers_plugin(BasePlugin):
+
+    def on_plugin_load(self):
+        self._cache = {}
+        self._lock = threading.Lock()
+        self._sml = {}
+        self._known = set()
+        self._sheets = {}
+        self._hook()
+
+    def on_plugin_unload(self):
+        with self._lock:
+            self._cache.clear()
+        self._sml.clear()
+        self._known.clear()
+        self._sheets.clear()
+
+    def _hook(self):
+        plugin = self
+        try:
+            cls = jclass.forName("org.telegram.ui.Components.SharedMediaLayout")
+            for m in cls.getDeclaredMethods():
+                if m.getName() != "updateTabs":
+                    continue
+                m.setAccessible(True)
+                class H(MethodHook):
+                    def after_hooked_method(self, param):
+                        run_on_ui_thread(lambda: plugin._on_tabs(param.thisObject), 50)
+                self.hook_method(m, H())
+                break
+            for m in cls.getDeclaredMethods():
+                if m.getName() != "switchToCurrentSelectedMode":
+                    continue
+                m.setAccessible(True)
+                class H2(MethodHook):
+                    def after_hooked_method(self, param):
+                        plugin._on_switch(param.thisObject)
+                self.hook_method(m, H2())
+                break
+        except Exception:
+            self.log("[cs] hook:\n" + traceback.format_exc())
+
+    def _on_tabs(self, sml):
+        try:
+            did = self._did(sml)
+            if not did:
+                return
+            self._sml[did] = weakref.ref(sml)
+            self._known.add(did)
+            st = self._state(did)
+            if st["items"] or st["busy"] or not st["done"]:
+                self._add_tab(sml)
+            if not st["items"] and not st["busy"] and not st["done"]:
+                self._scan(did, silent=True)
+            self._on_switch(sml)
+        except Exception:
+            pass
+
+    def _strip_id(self, sml):
+        try:
+            strip = get_private_field(sml, "scrollSlidingTextTabStrip")
+            if strip is None:
+                return -1
+            for name in ("getCurrentTabId", "getSelectedId"):
+                try:
+                    m = getattr(strip, name, None)
+                    if callable(m):
+                        return int(m())
+                except Exception:
+                    pass
+            for field in ("selectedId", "currentTabId", "selectedTabId"):
+                try:
+                    v = get_private_field(strip, field)
+                    if v is not None:
+                        return int(v)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return -1
+
+    def _on_switch(self, sml):
+        try:
+            did = self._did(sml)
+            if did not in self._known:
+                return
+            cur = self._strip_id(sml)
+            if cur < 0:
+                try:
+                    pages = get_private_field(sml, "mediaPages")
+                    if pages and pages[0] is not None:
+                        cur = int(get_private_field(pages[0], "selectedType"))
+                except Exception:
+                    cur = -1
+            if cur == TAB:
+                st = self._state(did)
+                if st["done"] and not st["items"]:
+                    self._sheets.pop(did, None)
+                    return
+                act = self._act()
+                if act is None:
+                    return
+                run_on_ui_thread(lambda: self._open(did, act), 40)
+            else:
+                self._sheets.pop(did, None)
+        except Exception:
+            pass
+
+    def _add_tab(self, sml):
+        try:
+            strip = get_private_field(sml, "scrollSlidingTextTabStrip")
+            if strip is None:
+                return
+            title = "стикеры"
+            exists = False
+            try:
+                ids = strip.getTabIds()
+                if ids:
+                    for i in range(ids.size()):
+                        if int(ids.get(i)) == TAB:
+                            exists = True
+                            break
+            except Exception:
+                pass
+            if not exists:
+                try:
+                    strip.addTextTab(TAB, title, None)
+                except Exception:
+                    try:
+                        strip.addTextTab(TAB, title)
+                    except Exception:
+                        return
+                try:
+                    strip.updateTabStyles()
+                except Exception:
+                    pass
+            self._bind_tab(sml, strip)
+        except Exception:
+            pass
+
+    def _bind_tab(self, sml, strip):
+        try:
+            container = get_private_field(strip, "tabsContainer")
+            if container is None:
+                return
+            did = self._did(sml)
+            plugin = self
+            for i in range(container.getChildCount()):
+                tab = container.getChildAt(i)
+                if tab is None:
+                    continue
+                try:
+                    label = str(tab.getText()).strip().lower()
+                except Exception:
+                    continue
+                if label not in ("стикеры", "stickers"):
+                    continue
+
+                class Click(dynamic_proxy(View.OnClickListener)):
+                    def onClick(self, v):
+                        try:
+                            m = getattr(strip, "selectTabWithId", None)
+                            if callable(m):
+                                m(TAB)
+                        except Exception:
+                            pass
+                        try:
+                            act = plugin._act()
+                            d = plugin._did(sml) or did
+                            if act is not None and d:
+                                st = plugin._state(d)
+                                if st["done"] and not st["items"]:
+                                    return
+                                plugin._sheets.pop(d, None)
+                                run_on_ui_thread(lambda: plugin._open(d, act), 50)
+                        except Exception:
+                            pass
+                tab.setOnClickListener(Click())
+                break
+        except Exception:
+            pass
+
+    def _open(self, did, act):
+        sheet = self._sheets.get(did)
+        if sheet is not None:
+            try:
+                if sheet.isShowing():
+                    return
+            except Exception:
+                pass
+            self._sheets.pop(did, None)
+
+        st = self._state(did)
+        if st["done"] and not st["items"]:
+            return
+
+        try:
+            ui = {
+                "did": did, "act": act,
+                "sort": "all", "page": 0,
+                "filter": "", "date_filter": None,
+                "chips": {},
+            }
+
+            root = LinearLayout(act)
+            root.setOrientation(LinearLayout.VERTICAL)
+            root.setBackgroundColor(_bg())
+
+            top = LinearLayout(act)
+            top.setOrientation(LinearLayout.HORIZONTAL)
+            top.setGravity(Gravity.CENTER_VERTICAL)
+            top.setPadding(dp(14), dp(14), dp(10), dp(6))
+
+            title = TextView(act)
+            n = len(st["items"])
+            title.setText("стикеры" + (("  ·  %d" % n) if n else ""))
+            title.setTextSize(1, 18.0)
+            title.setTypeface(Typeface.DEFAULT_BOLD)
+            title.setTextColor(_t1())
+            top.addView(title, LinearLayout.LayoutParams(0, -2, 1.0))
+            ui["title"] = title
+
+            reload_btn = TextView(act)
+            reload_btn.setText("↻")
+            reload_btn.setTextSize(1, 18.0)
+            reload_btn.setTextColor(_accent())
+            reload_btn.setPadding(dp(12), dp(4), dp(8), dp(4))
+            reload_btn.setOnClickListener(_click(lambda: self._rescan(ui)))
+            top.addView(reload_btn)
+
+            close = TextView(act)
+            close.setText("✕")
+            close.setTextSize(1, 16.0)
+            close.setTextColor(_t2())
+            close.setPadding(dp(8), dp(4), dp(8), dp(4))
+            top.addView(close)
+            root.addView(top)
+
+            search_wrap = LinearLayout(act)
+            search_wrap.setOrientation(LinearLayout.VERTICAL)
+            search_wrap.setPadding(dp(12), dp(4), dp(12), dp(4))
+
+            search = EditText(act)
+            search.setHint("эмодзи…")
+            search.setSingleLine(True)
+            search.setTextSize(1, 14.0)
+            search.setTextColor(_t1())
+            search.setHintTextColor(_t2())
+            search.setPadding(dp(14), dp(10), dp(14), dp(10))
+            search.setBackground(_search_bg())
+            search.setFocusableInTouchMode(True)
+            search.addTextChangedListener(_watch(lambda text: self._filter(ui, text)))
+            search.setOnClickListener(_click(lambda: self._kb(act, search)))
+            search_wrap.addView(search, LinearLayout.LayoutParams(-1, -2))
+
+            date = EditText(act)
+            date.setHint("дата дд.мм.гггг")
+            date.setSingleLine(True)
+            date.setTextSize(1, 13.0)
+            date.setTextColor(_t1())
+            date.setHintTextColor(_t2())
+            date.setPadding(dp(14), dp(8), dp(14), dp(8))
+            date.setBackground(_search_bg())
+            date.setFocusableInTouchMode(True)
+            lp_d = LinearLayout.LayoutParams(-1, -2)
+            lp_d.topMargin = dp(6)
+            date.addTextChangedListener(_watch(lambda text: self._date_filter(ui, text)))
+            date.setOnClickListener(_click(lambda: self._kb(act, date)))
+            search_wrap.addView(date, lp_d)
+            root.addView(search_wrap)
+
+            chips_scroll = HorizontalScrollView(act)
+            chips_scroll.setHorizontalScrollBarEnabled(False)
+            chips_row = LinearLayout(act)
+            chips_row.setOrientation(LinearLayout.HORIZONTAL)
+            chips_row.setPadding(dp(12), dp(8), dp(12), dp(8))
+
+            labels = [
+                ("all", "все"),
+                ("new", "новые"),
+                ("old", "старые"),
+                ("anim", "аним."),
+                ("static", "стат."),
+            ]
+            for mode, label in labels:
+                chip = TextView(act)
+                chip.setText(label)
+                chip.setTextSize(1, 13.0)
+                chip.setPadding(dp(14), dp(7), dp(14), dp(7))
+                active = mode == "all"
+                chip.setBackground(_chip_bg(active))
+                chip.setTextColor(_accent() if active else _t2())
+                chip.setTypeface(Typeface.DEFAULT_BOLD if active else Typeface.DEFAULT)
+                ui["chips"][mode] = chip
+                chip.setOnClickListener(_click(lambda m=mode: self._sort(ui, m)))
+                lp = LinearLayout.LayoutParams(-2, -2)
+                lp.setMargins(0, 0, dp(6), 0)
+                chips_row.addView(chip, lp)
+            chips_scroll.addView(chips_row)
+            root.addView(chips_scroll)
+
+            status = TextView(act)
+            status.setTextSize(1, 12.0)
+            status.setTextColor(_t2())
+            status.setPadding(dp(16), dp(2), dp(16), dp(6))
+            root.addView(status)
+            ui["status"] = status
+
+            scroll = ScrollView(act)
+            class Guard(dynamic_proxy(View.OnTouchListener)):
+                def onTouch(self, v, ev):
+                    try:
+                        a = ev.getAction()
+                        if a == MotionEvent.ACTION_DOWN:
+                            v.getParent().requestDisallowInterceptTouchEvent(True)
+                        elif a in (MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL):
+                            v.getParent().requestDisallowInterceptTouchEvent(False)
+                    except Exception:
+                        pass
+                    return False
+            scroll.setOnTouchListener(Guard())
+            content = LinearLayout(act)
+            content.setOrientation(LinearLayout.VERTICAL)
+            content.setPadding(dp(4), dp(2), dp(4), dp(8))
+            scroll.addView(content, ViewGroup.LayoutParams(-1, -2))
+            root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1.0))
+            ui["content"] = content
+
+            bottom = LinearLayout(act)
+            bottom.setOrientation(LinearLayout.HORIZONTAL)
+            bottom.setGravity(Gravity.CENTER)
+            bottom.setPadding(dp(12), dp(8), dp(12), dp(14))
+
+            prev = TextView(act)
+            prev.setText("‹")
+            prev.setTextSize(1, 20.0)
+            prev.setTextColor(_accent())
+            prev.setGravity(Gravity.CENTER)
+            prev.setBackground(_round_btn(False))
+            prev.setPadding(dp(18), dp(8), dp(18), dp(8))
+            prev.setOnClickListener(_click(lambda: self._page(ui, -1)))
+            bottom.addView(prev)
+
+            page_info = TextView(act)
+            page_info.setText("1 / 1")
+            page_info.setTextSize(1, 13.0)
+            page_info.setTextColor(_t2())
+            page_info.setGravity(Gravity.CENTER)
+            bottom.addView(page_info, LinearLayout.LayoutParams(0, -2, 1.0))
+            ui["page_info"] = page_info
+
+            next_btn = TextView(act)
+            next_btn.setText("›")
+            next_btn.setTextSize(1, 20.0)
+            next_btn.setTextColor(_accent())
+            next_btn.setGravity(Gravity.CENTER)
+            next_btn.setBackground(_round_btn(False))
+            next_btn.setPadding(dp(18), dp(8), dp(18), dp(8))
+            next_btn.setOnClickListener(_click(lambda: self._page(ui, 1)))
+            bottom.addView(next_btn)
+            ui["bottom"] = bottom
+            root.addView(bottom)
+
+            sheet = BottomSheet(act, False)
+            sheet.setCustomView(root)
+            ui["sheet"] = sheet
+            self._sheets[did] = sheet
+
+            def do_close():
+                self._sheets.pop(did, None)
+                try:
+                    imm = act.getSystemService(AndroidContext.INPUT_METHOD_SERVICE)
+                    if imm is not None:
+                        imm.hideSoftInputFromWindow(root.getWindowToken(), 0)
+                except Exception:
+                    pass
+                try:
+                    sheet.dismiss()
+                except Exception:
+                    pass
+            close.setOnClickListener(_click(do_close))
+
+            try:
+                OnDismiss = jclass.forName("android.content.DialogInterface$OnDismissListener")
+                class D(dynamic_proxy(OnDismiss)):
+                    def onDismiss(self, dialog):
+                        plugin = self
+                sheet.setOnDismissListener(D())
+            except Exception:
+                pass
+
+            try:
+                def on_dismiss():
+                    self._sheets.pop(did, None)
+            except Exception:
+                pass
+
+            sheet.show()
+            try:
+                win = sheet.getWindow()
+                if win is not None:
+                    win.clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
+                    win.clearFlags(WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM)
+                    win.setSoftInputMode(
+                        WindowManager.LayoutParams.SOFT_INPUT_STATE_UNSPECIFIED |
+                        WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+                    )
+            except Exception:
+                pass
+
+            self._render(did, ui)
+            if not st["items"]:
+                self._scan(did, silent=False, ui=ui)
+        except Exception:
+            self._sheets.pop(did, None)
+            self.log("[cs] open:\n" + traceback.format_exc())
+
+    def _rescan(self, ui):
+        did = ui["did"]
+        st = self._state(did)
+        st["items"].clear()
+        st["offset"] = 0
+        st["done"] = False
+        st["busy"] = False
+        st["last_ui"] = -1
+        ui["page"] = 0
+        self._render(did, ui)
+        self._scan(did, silent=False, ui=ui)
+
+    def _sort(self, ui, mode):
+        ui["sort"] = mode
+        ui["page"] = 0
+        for m, chip in ui["chips"].items():
+            active = m == mode
+            chip.setBackground(_chip_bg(active))
+            chip.setTextColor(_accent() if active else _t2())
+            chip.setTypeface(Typeface.DEFAULT_BOLD if active else Typeface.DEFAULT)
+        self._render(ui["did"], ui)
+
+    def _filter(self, ui, text):
+        ui["filter"] = (text or "").strip().lower()
+        ui["page"] = 0
+        self._render(ui["did"], ui)
+
+    def _date_filter(self, ui, text):
+        text = (text or "").strip()
+        ui["date_filter"] = None
+        if text:
+            try:
+                dt = datetime.strptime(text, "%d.%m.%Y")
+                start = int(dt.replace(hour=0, minute=0, second=0).timestamp())
+                ui["date_filter"] = (start, start + 86400)
+            except Exception:
+                pass
+        ui["page"] = 0
+        self._render(ui["did"], ui)
+
+    def _page(self, ui, delta):
+        ui["page"] = max(0, ui.get("page", 0) + delta)
+        self._render(ui["did"], ui)
+
+    def _list(self, did, mode):
+        items = list(self._state(did)["items"].values())
+        if mode == "anim":
+            items = [e for e in items if e.get("animated")]
+            items.sort(key=lambda e: -e["date"])
+        elif mode == "static":
+            items = [e for e in items if not e.get("animated")]
+            items.sort(key=lambda e: -e["date"])
+        elif mode == "old":
+            items.sort(key=lambda e: e["date"])
+        else:
+            items.sort(key=lambda e: -e["date"])
+        return items
+
+    def _render(self, did, ui):
+        try:
+            st = self._state(did)
+            content = ui["content"]
+            content.removeAllViews()
+            act = ui["act"]
+            items = self._list(did, ui.get("sort", "all"))
+
+            flt = (ui.get("filter") or "").strip().lower()
+            if flt:
+                items = [e for e in items if flt in (e.get("emoji") or "").lower()]
+            df = ui.get("date_filter")
+            if df:
+                a, b = df
+                items = [e for e in items if a <= e.get("date", 0) < b]
+
+            n = len(st["items"])
+            total = len(items)
+
+            if ui.get("title"):
+                ui["title"].setText("стикеры" + (("  ·  %d" % n) if n else ""))
+
+            if ui.get("status"):
+                if st["busy"]:
+                    ui["status"].setText("поиск… %d" % n)
+                elif st["done"]:
+                    ui["status"].setText("готово · %d" % n)
+                else:
+                    ui["status"].setText(str(n) if n else "")
+
+            page = ui.get("page", 0)
+            if total > 0:
+                max_page = max(0, (total - 1) // PAGE_UI)
+                page = min(page, max_page)
+                ui["page"] = page
+                start = page * PAGE_UI
+                end = min(start + PAGE_UI, total)
+                page_items = items[start:end]
+                if ui.get("page_info"):
+                    ui["page_info"].setText("%d / %d" % (page + 1, max_page + 1))
+                if ui.get("bottom"):
+                    ui["bottom"].setVisibility(View.VISIBLE if total > PAGE_UI else View.GONE)
+            else:
+                page_items = []
+                if ui.get("bottom"):
+                    ui["bottom"].setVisibility(View.GONE)
+
+            if not page_items:
+                tv = TextView(act)
+                if (flt or df) and (st["done"] or n):
+                    tv.setText("ничего не найдено")
+                else:
+                    tv.setText("поиск…" if not st["done"] else "пусто")
+                tv.setTextColor(_t2())
+                tv.setTextSize(1, 15.0)
+                tv.setGravity(Gravity.CENTER)
+                tv.setPadding(0, dp(48), 0, 0)
+                content.addView(tv, LinearLayout.LayoutParams(-1, -2))
+            else:
+                self._grid(act, content, ui, page_items)
+
+            if st["busy"]:
+                loading = TextView(act)
+                loading.setText("загрузка…")
+                loading.setTextSize(1, 13.0)
+                loading.setTextColor(_t2())
+                loading.setGravity(Gravity.CENTER)
+                loading.setPadding(0, dp(12), 0, dp(4))
+                content.addView(loading)
+            elif not st["done"]:
+                more = TextView(act)
+                more.setText("ещё")
+                more.setTextSize(1, 14.0)
+                more.setTextColor(Color.WHITE)
+                more.setGravity(Gravity.CENTER)
+                more.setBackground(_round_btn(True))
+                more.setPadding(dp(24), dp(10), dp(24), dp(10))
+                more.setOnClickListener(_click(lambda: self._scan(did, silent=False, ui=ui)))
+                wrap = LinearLayout(act)
+                wrap.setGravity(Gravity.CENTER)
+                wrap.setPadding(0, dp(10), 0, dp(6))
+                wrap.addView(more)
+                content.addView(wrap, LinearLayout.LayoutParams(-1, -2))
+        except Exception:
+            self.log("[cs] render:\n" + traceback.format_exc())
+
+    def _grid(self, act, content, ui, items):
+        gap = dp(3)
+        try:
+            w = AndroidUtilities.displaySize.x
+        except Exception:
+            w = dp(360)
+        c = COLS
+        cell = max(dp(56), (w - dp(12) - gap * 2 * c) // c)
+        cell = int(cell)
+        row = None
+        for i, e in enumerate(items):
+            if i % c == 0:
+                row = LinearLayout(act)
+                row.setOrientation(LinearLayout.HORIZONTAL)
+                content.addView(row, LinearLayout.LayoutParams(-1, -2))
+            lp = LinearLayout.LayoutParams(cell, cell)
+            lp.setMargins(gap, gap, gap, gap)
+            row.addView(self._cell(act, ui, e), lp)
+
+    def _cell(self, act, ui, entry):
+        card = FrameLayout(act)
+        iv = BackupImageView(act)
+        self._bind(iv, entry)
+        card.addView(iv, FrameLayout.LayoutParams(-1, -1))
+        pad = dp(3)
+        iv.setPadding(pad, pad, pad, pad)
+        card.setOnClickListener(_click(lambda: self._open_pack(ui, entry)))
+        card.setOnLongClickListener(_long(lambda: self._menu(ui, entry)))
+        return card
+
+    def _bind(self, iv, entry):
+        try:
+            doc = entry["doc"]
+            thumbs = getattr(doc, "thumbs", None)
+            thumb = None
+            if thumbs and thumbs.size() > 0:
+                thumb = FileLoader.getClosestPhotoSizeWithSize(thumbs, 90)
+            if entry.get("animated") and thumb:
+                loc = ImageLocation.getForDocument(thumb, doc)
+            else:
+                loc = ImageLocation.getForDocument(doc)
+            iv.setImage(loc, "70_70", cast(Drawable, None), doc)
+        except Exception:
+            pass
+
+    def _act(self):
+        f = get_last_fragment()
+        return f.getParentActivity() if f else None
+
+    def _kb(self, act, view):
+        try:
+            view.requestFocus()
+            imm = act.getSystemService(AndroidContext.INPUT_METHOD_SERVICE)
+            if imm is not None:
+                imm.showSoftInput(view, InputMethodManager.SHOW_IMPLICIT)
+        except Exception:
+            pass
+
+    def _open_pack(self, ui, entry):
+        if not entry or not entry.get("set_id"):
+            _msg(self._act(), "пак", "не найден")
+            return
+        try:
+            act = ui.get("act") or self._act()
+            frag = get_last_fragment()
+            if act is None or frag is None:
+                return
+            inp = TLRPC.TL_inputStickerSetID()
+            inp.id = int(entry["set_id"])
+            inp.access_hash = int(entry.get("set_hash") or 0)
+            best = None
+            for c in StickersAlert.getClass().getConstructors():
+                names = [p.getSimpleName() for p in c.getParameterTypes()]
+                if len(names) >= 3 and "Context" in names[0] and "BaseFragment" in names[1] and "InputStickerSet" in names[2]:
+                    if best is None or len(names) < len(best.getParameterTypes()):
+                        best = c
+            if best is None:
+                return
+            args = [act, frag, inp]
+            for p in best.getParameterTypes()[3:]:
+                nm = p.getSimpleName()
+                if nm == "boolean":
+                    args.append(False)
+                elif nm in ("int", "long", "short", "byte", "float", "double"):
+                    args.append(0)
+                else:
+                    args.append(None)
+            try:
+                if ui.get("sheet"):
+                    ui["sheet"].dismiss()
+            except Exception:
+                pass
+            best.newInstance(*args).show()
+        except Exception:
+            pass
+
+    def _menu(self, ui, entry):
+        act = ui.get("act") or self._act()
+        if act is None:
+            return
+        try:
+            b = AlertDialog.Builder(act)
+            b.setTitle(entry.get("emoji") or "стикер")
+            box = LinearLayout(act)
+            box.setOrientation(LinearLayout.VERTICAL)
+            box.setPadding(0, dp(4), 0, dp(4))
+            hold = []
+
+            def add(label, fn):
+                tv = TextView(act)
+                tv.setText(label)
+                tv.setTextSize(1, 15.0)
+                tv.setTextColor(_t1())
+                tv.setPadding(dp(20), dp(12), dp(20), dp(12))
+                def go():
+                    try:
+                        if hold:
+                            hold[0].dismiss()
+                    except Exception:
+                        pass
+                    try:
+                        fn()
+                    except Exception:
+                        pass
+                tv.setOnClickListener(_click(go))
+                box.addView(tv)
+
+            add("к сообщению", lambda: self._jump(ui, entry))
+            add("скачать", lambda: self._save(entry))
+            add("установить пак", lambda: self._install(entry))
+            add("в избранное", lambda: self._fave(entry))
+            add("открыть пак", lambda: self._open_pack(ui, entry))
+            b.setView(box)
+            b.setNegativeButton("отмена", None)
+            hold.append(b.show())
+        except Exception:
+            pass
+
+    def _fave(self, entry):
+        try:
+            MediaDataController.getInstance(UserConfig.selectedAccount).addRecentSticker(
+                MediaDataController.TYPE_FAVE, None, entry["doc"],
+                int(System.currentTimeMillis() / 1000), False)
+            _msg(self._act(), "избранное", "добавлено")
+        except Exception:
+            _msg(self._act(), "ошибка", "не удалось")
+
+    def _save(self, entry):
+        try:
+            loader = FileLoader.getInstance(UserConfig.selectedAccount)
+            path = loader.getPathToAttach(entry["doc"], True)
+            if path is None or not path.exists():
+                loader.loadFile(entry["doc"], "chat_stickers", 0, 0)
+                _msg(self._act(), "скачивание", "загружается…")
+                return
+            if entry.get("animated"):
+                try:
+                    from java.io import File
+                    from java.nio.file import Files, StandardCopyOption
+                    from android.os import Environment
+                    name = path.getName() or ("sticker_%s.tgs" % entry["doc_id"])
+                    downloads = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                    if downloads and not downloads.exists():
+                        downloads.mkdirs()
+                    dst = File(downloads, name)
+                    Files.copy(path.toPath(), dst.toPath(), StandardCopyOption.REPLACE_EXISTING)
+                    _msg(self._act(), "сохранено", name)
+                except Exception:
+                    _msg(self._act(), "ошибка", "не удалось")
+                return
+            bmp = BitmapFactory.decodeFile(path.getAbsolutePath())
+            if bmp is None:
+                _msg(self._act(), "ошибка", "не удалось")
+                return
+            MediaStore.Images.Media.insertImage(
+                ApplicationLoader.applicationContext.getContentResolver(),
+                bmp, "sticker_%s" % entry["doc_id"], "sticker tab")
+            _msg(self._act(), "сохранено", "в галерею")
+        except Exception:
+            _msg(self._act(), "ошибка", "не удалось")
+
+    def _install(self, entry):
+        if not entry or not entry.get("set_id"):
+            _msg(self._act(), "пак", "не найден")
+            return
+        try:
+            inp = TLRPC.TL_inputStickerSetID()
+            inp.id = int(entry["set_id"])
+            inp.access_hash = int(entry.get("set_hash") or 0)
+            req = TLRPC.TL_messages_installStickerSet()
+            req.stickerset = inp
+            req.archived = False
+            def on_resp(response, error):
+                def done():
+                    if error is not None:
+                        txt = str(getattr(error, "text", "") or error)
+                        if "already" in str(txt).lower():
+                            _msg(self._act(), "пак", "уже установлен")
+                        else:
+                            _msg(self._act(), "ошибка", "не удалось")
+                        return
+                    try:
+                        MediaDataController.getInstance(UserConfig.selectedAccount).loadStickers(
+                            MediaDataController.TYPE_IMAGE, False, True)
+                    except Exception:
+                        pass
+                    _msg(self._act(), "пак", "установлен")
+                run_on_ui_thread(done)
+            send_request(req, RequestCallback(on_resp))
+        except Exception:
+            _msg(self._act(), "ошибка", "не удалось")
+
+    def _jump(self, ui, entry):
+        try:
+            if ui.get("sheet"):
+                ui["sheet"].dismiss()
+        except Exception:
+            pass
+        try:
+            did = ui["did"]
+            args = Bundle()
+            if did > 0:
+                args.putLong("user_id", did)
+            else:
+                args.putLong("chat_id", -did)
+            args.putInt("message_id", entry["msg_id"])
+            f = get_last_fragment()
+            if f:
+                f.presentFragment(ChatActivity(args))
+        except Exception:
+            pass
+
+    def _state(self, did):
+        with self._lock:
+            s = self._cache.get(did)
+            if s is None:
+                s = {
+                    "items": {}, "offset": 0, "done": False,
+                    "busy": False, "scanned": 0, "budget": 0, "last_ui": -1,
+                }
+                self._cache[did] = s
+            return s
+
+    def _scan(self, did, silent=False, ui=None):
+        st = self._state(did)
+        if st["busy"] or st["done"]:
+            if not silent and ui is not None:
+                self._render(did, ui)
+            return
+        st["busy"] = True
+        st["budget"] = DEPTH
+        self._req(did, silent=silent, ui=ui)
+
+    def _req(self, did, silent=False, ui=None):
+        st = self._state(did)
+        try:
+            req = TLRPC.TL_messages_getHistory()
+            req.peer = get_messages_controller().getInputPeer(int(did))
+            req.offset_id = int(st["offset"])
+            req.offset_date = 0
+            req.add_offset = 0
+            req.limit = PAGE
+            req.max_id = 0
+            req.min_id = 0
+            req.hash = 0
+            def cb(resp, err):
+                run_on_ui_thread(lambda: self._on_page(did, resp, err, silent=silent, ui=ui))
+            send_request(req, RequestCallback(cb))
+        except Exception:
+            st["busy"] = False
+
+    def _on_page(self, did, response, error, silent=False, ui=None):
+        st = self._state(did)
+        try:
+            if error is not None:
+                st["busy"] = False
+                if not silent and ui is not None:
+                    self._render(did, ui)
+                return
+            msgs = None
+            try:
+                msgs = response.getClass().getField("messages").get(response)
+            except Exception:
+                msgs = getattr(response, "messages", None)
+            count = msgs.size() if msgs else 0
+            min_id = None
+            for i in range(count):
+                msg = msgs.get(i)
+                try:
+                    mid = int(getattr(msg, "id", 0) or 0)
+                    if mid and (min_id is None or mid < min_id):
+                        min_id = mid
+                    self._eat(st, msg)
+                except Exception:
+                    continue
+            st["scanned"] += count
+            st["budget"] -= count
+            if count < PAGE or min_id is None or min_id <= 1:
+                st["done"] = True
+                st["busy"] = False
+            else:
+                st["offset"] = min_id
+                if st["budget"] <= 0:
+                    st["busy"] = False
+            if st["items"]:
+                ref = self._sml.get(did)
+                if ref:
+                    sml = ref()
+                    if sml:
+                        self._add_tab(sml)
+            n = len(st["items"])
+            should = (
+                not silent and ui is not None and
+                (st["done"] or not st["busy"] or n - st.get("last_ui", -1) >= 30)
+            )
+            if should:
+                st["last_ui"] = n
+                self._render(did, ui)
+            if st["busy"]:
+                self._req(did, silent=silent, ui=ui)
+        except Exception:
+            st["busy"] = False
+
+    def _eat(self, st, msg):
+        media = getattr(msg, "media", None)
+        doc = getattr(media, "document", None) if media else None
+        attrs = getattr(doc, "attributes", None) if doc else None
+        if not attrs:
+            return
+        sa = None
+        for j in range(attrs.size()):
+            a = attrs.get(j)
+            if "Sticker" in type(a).__name__ and hasattr(a, "stickerset"):
+                sa = a
+                break
+        if not sa:
+            return
+        msg_id = int(getattr(msg, "id", 0) or 0)
+        doc_id = int(doc.id)
+        key = "%s:%s" % (msg_id, doc_id)
+        if key in st["items"]:
+            return
+        sset = getattr(sa, "stickerset", None)
+        mime = str(getattr(doc, "mime_type", "") or "")
+        st["items"][key] = {
+            "doc": doc,
+            "doc_id": doc_id,
+            "set_id": int(getattr(sset, "id", 0) or 0) if sset else 0,
+            "set_hash": int(getattr(sset, "access_hash", 0) or 0) if sset else 0,
+            "emoji": str(getattr(sa, "alt", "") or ""),
+            "date": int(getattr(msg, "date", 0) or 0),
+            "msg_id": msg_id,
+            "animated": any(x in mime for x in ("tgs", "webm", "video")),
+        }
+
+    def _did(self, sml):
+        try:
+            d = get_private_field(sml, "dialog_id")
+            return int(d) if d else 0
+        except Exception:
+            return 0
+
+    def create_settings(self):
+        return []
+
+
+plugin = chat_stickers_plugin()
